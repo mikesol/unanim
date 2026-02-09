@@ -63,3 +63,37 @@ proc collectSecrets*(n: NimNode, secrets: var seq[string]) =
   # Default: recurse into all children
   for i in 0 ..< n.len:
     collectSecrets(n[i], secrets)
+
+macro withSecrets*(varName: untyped, body: untyped): untyped =
+  ## Wraps a block of code, walks the AST to collect all secret() references,
+  ## and exposes the collected secret names as a `seq[string]` variable.
+  ##
+  ## Usage:
+  ##   withSecrets(mySecrets):
+  ##     let header = "Bearer " & secret("openai-key")
+  ##     let other = secret("fal-key")
+  ##   # mySecrets is now @["openai-key", "fal-key"]
+  ##
+  ## This macro:
+  ## 1. Walks the body AST at compile time
+  ## 2. Validates all secret() calls have string literal arguments
+  ## 3. Collects the names into compile-time metadata
+  ## 4. Emits the original body unchanged (secret template still produces placeholders)
+  ## 5. Defines `varName` as a `seq[string]` containing the collected names
+
+  var secrets: seq[string] = @[]
+  collectSecrets(body, secrets)
+
+  # Build the seq literal for the collected secret names
+  var seqLit = newNimNode(nnkBracket)
+  for s in secrets:
+    seqLit.add(newStrLitNode(s))
+
+  result = newStmtList()
+  result.add(body)
+  result.add(
+    newLetStmt(
+      varName,
+      newCall(ident("@"), seqLit)
+    )
+  )

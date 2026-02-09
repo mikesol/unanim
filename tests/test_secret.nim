@@ -46,4 +46,13 @@ block testNestedSecretInConcat:
     doAssert secrets == @["openai-key"],
       "Should find secret nested in & concat but got: " & $secrets
 
+block testWithSecretsMacro:
+  withSecrets(mySecrets):
+    let header = "Bearer " & secret("openai-key")
+    let other = secret("fal-key")
+
+  # mySecrets should be a seq[string] available at runtime
+  doAssert mySecrets == @["openai-key", "fal-key"],
+    "withSecrets should expose collected secret names, got: " & $mySecrets
+
 echo "All secret tests passed."
