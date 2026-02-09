@@ -71,6 +71,7 @@ gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<thre
 
 ## Standing rules
 
+- **NEVER merge PRs without explicit user authorization.** Always wait for the user to say "merge it" (or equivalent). Creating a PR is fine; merging is not. Bot reviewers (CodeRabbit, Copilot) need time to review, and the user needs to see their feedback before deciding to merge. No exceptions.
 - **Ejectability by design**: Generated artifacts must be independently runnable without the framework. Always.
 - **SCAFFOLD code**: If you encounter code marked `SCAFFOLD`, don't modify/extend/build on it beyond its stated purpose. When you create scaffold code, add a `SCAFFOLD(phase, #issue)` comment and create a `scaffold-cleanup` issue.
 - **Spec seems wrong?** STOP. Open a GitHub Issue labeled `spec-change` with: the problem (with evidence), affected VISION.md sections, proposed change, downstream impact. Don't build on a wrong assumption.
