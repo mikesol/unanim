@@ -9,6 +9,7 @@
 ## See VISION.md Section 2, Principles 1 and 7; Appendix C.
 
 import std/macros
+import std/strutils
 
 proc isSecretCall(n: NimNode): bool =
   ## Check if a node is a secret("name") call.
@@ -34,8 +35,6 @@ proc collectSecretNamesFromNode*(n: NimNode, names: var seq[string]) =
     return  # don't recurse into the secret call itself
   for i in 0..<n.len:
     collectSecretNamesFromNode(n[i], names)
-
-import std/strutils
 
 proc isCallTo(n: NimNode, name: string): bool =
   ## Check if a node is a call to the given identifier.
