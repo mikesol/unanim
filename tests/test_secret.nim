@@ -19,4 +19,19 @@ block testCollectSecretsBasic:
     doAssert secrets == @["openai-key"],
       "collectSecrets should find 'openai-key' but got: " & $secrets
 
+block testCollectMultipleSecrets:
+  static:
+    let ast = newStmtList(
+      newCall(ident("secret"), newStrLitNode("openai-key")),
+      newCall(ident("secret"), newStrLitNode("fal-key")),
+      newCall(ident("secret"), newStrLitNode("jwt-signing-key"))
+    )
+    var secrets: seq[string] = @[]
+    collectSecrets(ast, secrets)
+    doAssert secrets.len == 3,
+      "Should find 3 secrets but found " & $secrets.len
+    doAssert secrets[0] == "openai-key"
+    doAssert secrets[1] == "fal-key"
+    doAssert secrets[2] == "jwt-signing-key"
+
 echo "All secret tests passed."
