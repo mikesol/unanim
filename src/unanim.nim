@@ -16,3 +16,6 @@ export codegen
 
 import unanim/clientgen
 export clientgen
+
+import unanim/eventlog
+export eventlog
