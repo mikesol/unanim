@@ -194,4 +194,14 @@ block testNoSecrets:
 
 echo "test_codegen: Task 10 passed."
 
+# --- Task 11: CORS headers ---
+block testCorsHeaders:
+  let js = generateWorkerJs(@[], @[])
+  doAssert "Access-Control-Allow-Origin" in js,
+    "Generated JS should contain CORS header"
+  doAssert "OPTIONS" in js,
+    "Generated JS should handle OPTIONS preflight"
+
+echo "test_codegen: Task 11 passed."
+
 echo "All codegen tests passed."

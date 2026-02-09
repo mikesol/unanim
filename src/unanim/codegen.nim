@@ -43,11 +43,23 @@ proc generateWorkerJs*(secrets: seq[string], routes: seq[RouteInfo]): string =
 
 export default {
   async fetch(request, env, ctx) {
+    // Handle CORS preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+        },
+      });
+    }
+
     // Only accept POST requests
     if (request.method !== "POST") {
       return new Response(JSON.stringify({ error: "Method not allowed. Use POST." }), {
         status: 405,
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
       });
     }
 
@@ -57,7 +69,7 @@ export default {
     } catch (e) {
       return new Response(JSON.stringify({ error: "Invalid JSON body." }), {
         status: 400,
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
       });
     }
 
@@ -66,7 +78,7 @@ export default {
     if (!url) {
       return new Response(JSON.stringify({ error: "Missing 'url' in request body." }), {
         status: 400,
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
       });
     }
 
@@ -116,12 +128,13 @@ export default {
         status: response.status,
         headers: {
           "Content-Type": response.headers.get("Content-Type") || "application/octet-stream",
+          "Access-Control-Allow-Origin": "*",
         },
       });
     } catch (e) {
       return new Response(JSON.stringify({ error: "Upstream request failed: " + e.message }), {
         status: 502,
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
       });
     }
   },
