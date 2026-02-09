@@ -228,6 +228,58 @@ proc scanForSecrets*(jsOutput: string, secretNames: seq[string]): seq[string] =
       if name notin result:
         result.add(name)
 
+macro compileClientJs*(nimSource: static[string]): string =
+  ## Compile a Nim source string to JavaScript at compile time using `nim js`.
+  ## Returns the compiled JS as a string.
+  ##
+  ## Uses gorgeEx to invoke the Nim compiler during macro expansion.
+  ## This is the same pattern demonstrated in the PoC (VISION.md Appendix C).
+  let tmpDir = "/tmp/unanim_clientgen"
+  discard gorge("mkdir -p " & tmpDir)
+
+  let srcFile = tmpDir & "/client_src.nim"
+  let jsFile = tmpDir & "/client_src.js"
+
+  # Write the source file at compile time
+  # Dedent: find minimum indentation across non-empty lines and strip it
+  var lines = nimSource.splitLines()
+  var minIndent = high(int)
+  for line in lines:
+    if line.strip().len > 0:
+      var indent = 0
+      for ch in line:
+        if ch == ' ':
+          indent += 1
+        else:
+          break
+      if indent < minIndent:
+        minIndent = indent
+  if minIndent == high(int):
+    minIndent = 0
+  var dedented = ""
+  for i, line in lines:
+    if i > 0:
+      dedented.add("\n")
+    if line.strip().len > 0 and line.len >= minIndent:
+      dedented.add(line[minIndent..^1])
+    else:
+      dedented.add(line)
+  # Trim leading/trailing blank lines
+  dedented = dedented.strip(chars = {'\n', '\r'})
+  writeFile(srcFile, dedented)
+
+  # Find nim compiler
+  let nimBin = gorge("which nim 2>/dev/null || echo $HOME/.nimble/bin/nim").strip()
+
+  let cmd = nimBin & " js --opt:size -d:danger --hints:off -o:" & jsFile & " " & srcFile
+  let (output, exitCode) = gorgeEx(cmd)
+
+  if exitCode != 0:
+    error("nim js compilation failed:\n" & output)
+
+  let jsContent = staticRead(jsFile)
+  result = newStrLitNode(jsContent)
+
 proc generateHtmlShell*(scriptFile: string, title: string = "App"): string =
   ## Generate a minimal standalone HTML shell that loads the compiled JS.
   ## SCAFFOLD(Phase 1, #5): This is a minimal scaffold. Will be replaced

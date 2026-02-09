@@ -218,3 +218,17 @@ block testScanForSecretsPartialMatch:
   doAssert "my-token" in found
 
 echo "test_clientgen: Task 6 passed."
+
+block testCompileClientJsBasic:
+  # Compile a minimal Nim program to JS at compile time
+  const js = compileClientJs("""
+    proc main() =
+      echo "hello from client"
+    main()
+  """)
+  doAssert js.len > 0, "Compiled JS should not be empty"
+  # Nim's JS backend always produces some output
+  doAssert "function" in js or "var" in js,
+    "Compiled JS should contain JS constructs, got: " & js[0..min(200, js.len-1)]
+
+echo "test_clientgen: Task 7 passed."
