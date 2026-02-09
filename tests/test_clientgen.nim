@@ -145,3 +145,44 @@ block testRewriteProxyRequired:
   doAssert true, "ProxyRequired rewrite should compile and execute"
 
 echo "test_clientgen: Task 4b passed."
+
+# Use a compile-time macro to inspect the rewritten AST as a string
+macro getRewrittenRepr(workerUrl: static[string], body: untyped): string =
+  let rewritten = rewriteNode(body, workerUrl)
+  result = newStrLitNode(rewritten.repr)
+
+block testDirectFetchReprContainsOriginalUrl:
+  let code = getRewrittenRepr("https://worker.example.com/proxy"):
+    discard proxyFetch("https://api.example.com/public", body = "test")
+  doAssert "fetch" in code, "Rewritten code should call fetch, got: " & code
+  doAssert "proxyFetch" notin code,
+    "Rewritten code should NOT contain proxyFetch, got: " & code
+  doAssert "api.example.com/public" in code,
+    "DirectFetch should keep original URL, got: " & code
+
+block testProxyRequiredReprContainsWorkerUrl:
+  let code = getRewrittenRepr("https://worker.example.com/proxy"):
+    discard proxyFetch("https://api.openai.com/v1/chat",
+      headers = {"Authorization": "Bearer " & secret("openai-key")},
+      body = "test")
+  doAssert "fetch" in code, "Rewritten code should call fetch, got: " & code
+  doAssert "proxyFetch" notin code,
+    "Rewritten code should NOT contain proxyFetch, got: " & code
+  doAssert "worker.example.com/proxy" in code,
+    "ProxyRequired should target worker URL, got: " & code
+  doAssert "X-Unanim-Secrets" in code,
+    "ProxyRequired should include secret metadata header, got: " & code
+  doAssert "openai-key" in code,
+    "Secret metadata header should include secret name, got: " & code
+
+block testProxyRequiredReprDoesNotContainSecretMarker:
+  let code = getRewrittenRepr("https://worker.example.com/proxy"):
+    discard proxyFetch("https://api.openai.com/v1/chat",
+      headers = {"Authorization": "Bearer " & secret("openai-key")},
+      body = "test")
+  doAssert "<<SECRET:" notin code,
+    "Rewritten code should NOT contain secret placeholder markers, got: " & code
+  doAssert "secret(" notin code,
+    "Rewritten code should NOT contain secret() calls, got: " & code
+
+echo "test_clientgen: Task 5 passed."
