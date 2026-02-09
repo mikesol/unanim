@@ -7,6 +7,26 @@
 
 import std/macros
 
+var secretRegistry* {.compileTime.}: seq[string] = @[]
+
+proc registerSecret*(name: string) {.compileTime.} =
+  ## Register a secret name in the global compile-time registry.
+  ## Duplicates are ignored.
+  if name notin secretRegistry:
+    secretRegistry.add(name)
+
+proc clearSecretRegistry*() {.compileTime.} =
+  ## Clear the global secret registry. Useful for testing.
+  secretRegistry = @[]
+
+macro getRegisteredSecrets*(): seq[string] =
+  ## Returns the current contents of the secret registry as a runtime value.
+  ## Call this after all secret-containing code has been processed by macros.
+  var bracket = newNimNode(nnkBracket)
+  for s in secretRegistry:
+    bracket.add(newStrLitNode(s))
+  result = newCall(ident("@"), bracket)
+
 template secret*(name: static[string]): string =
   ## Marks a secret reference. At compile time, the `static[string]` constraint
   ## ensures the argument is a compile-time constant. At runtime (before codegen
@@ -57,6 +77,7 @@ proc collectSecrets*(n: NimNode, secrets: var seq[string]) =
           arg
         )
 
+      registerSecret(arg.strVal)
       secrets.add(arg.strVal)
       return  # Don't recurse into children of a valid secret() call
 

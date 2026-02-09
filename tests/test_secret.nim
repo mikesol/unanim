@@ -55,4 +55,19 @@ block testWithSecretsMacro:
   doAssert mySecrets == @["openai-key", "fal-key"],
     "withSecrets should expose collected secret names, got: " & $mySecrets
 
+block testGlobalSecretRegistry:
+  # Reset the registry before this test
+  static:
+    clearSecretRegistry()
+
+  static:
+    # Simulate what the framework macro would do: walk AST, register secrets
+    registerSecret("openai-key")
+    registerSecret("fal-key")
+    registerSecret("openai-key")  # duplicate -- should be deduplicated
+
+  let names = getRegisteredSecrets()
+  doAssert names == @["openai-key", "fal-key"],
+    "Registry should deduplicate and return: " & $names
+
 echo "All secret tests passed."
