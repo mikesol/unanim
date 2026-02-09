@@ -11,3 +11,5 @@ requires "nim >= 2.0.0"
 # Tasks
 task test, "Run tests":
   exec "nim c -r tests/test_unanim.nim"
+  exec "nim c -r tests/test_secret.nim"
+  exec "nim c -r tests/test_secret_errors.nim"
