@@ -68,7 +68,7 @@ proc extractProxyFetchCall(n: NimNode): NimNode =
 proc classifyProxyFetch(pfNode: NimNode): (ProxyFetchClassification, seq[string]) =
   var secrets: seq[string] = @[]
   collectSecretNames(pfNode, secrets)
-  let classification = if secrets.len > 0: ProxyRequired else: DirectFetch
+  let classification = if containsSecret(pfNode): ProxyRequired else: DirectFetch
   return (classification, secrets)
 
 macro analyze*(body: untyped): untyped =
