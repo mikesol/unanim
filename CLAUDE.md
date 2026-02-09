@@ -45,6 +45,30 @@ PR body must include:
 
 **Never** use `run_in_background: true` with the Task tool for implementation work. Background agents cannot prompt for permissions and will silently fail or write to wrong directories.
 
+## How to handle PR reviews
+
+After creating a PR, bot reviewers (CodeRabbit, Copilot) will leave comments. Triage them:
+
+1. **Reply to every comment** with a concise rationale (fix, defer, or dismiss with reason)
+2. **Resolve every thread** after replying — use the GraphQL `resolveReviewThread` mutation
+3. **Fix only what's actually wrong** — bot reviewers lack project context and frequently suggest over-engineering
+
+**API reference** (so you don't have to rediscover this):
+
+```bash
+# Get review comment IDs
+gh api repos/mikesol/unanim/pulls/<N>/comments --jq '.[] | {id, user: .user.login, path, line, body: .body[:80]}'
+
+# Reply to a review comment (in_reply_to creates a thread reply)
+gh api repos/mikesol/unanim/pulls/<N>/comments -f body="Your reply" -F in_reply_to=<comment_id>
+
+# Get thread IDs for resolving
+gh api graphql -f query='{ repository(owner: "mikesol", name: "unanim") { pullRequest(number: <N>) { reviewThreads(first: 50) { nodes { id isResolved } } } } }'
+
+# Resolve a thread
+gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<thread_id>"}) { thread { isResolved } } }'
+```
+
 ## Standing rules
 
 - **Ejectability by design**: Generated artifacts must be independently runnable without the framework. Always.
