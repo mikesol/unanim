@@ -7,6 +7,7 @@
 
 import std/json
 import std/strutils
+import std/times
 import nimcrypto/sha2
 import nimcrypto/hash
 
@@ -79,3 +80,78 @@ proc canonicalForm*(e: Event): string =
 proc hashEvent*(e: Event): string =
   ## SHA-256 of an event's canonical form.
   sha256Hex(canonicalForm(e))
+
+type
+  EventLog* = object
+    events*: seq[Event]
+
+proc newEventLog*(): EventLog =
+  EventLog(events: @[])
+
+proc len*(log: EventLog): int =
+  log.events.len
+
+proc `[]`*(log: EventLog, idx: int): Event =
+  log.events[idx]
+
+proc append*(log: var EventLog, eventType: EventType, schemaVersion: uint32,
+             payload: string) =
+  ## Append event with automatic sequence, timestamp, parentHash, stateHashAfter.
+  let nextSeq = if log.events.len == 0: 1.uint64
+                else: log.events[^1].sequence + 1
+
+  let parentHash = if log.events.len == 0: "0".repeat(64)
+                   else: hashEvent(log.events[^1])
+
+  var event = Event(
+    sequence: nextSeq,
+    timestamp: $now().utc,
+    eventType: eventType,
+    schemaVersion: schemaVersion,
+    payload: payload,
+    stateHashAfter: "",
+    parentHash: parentHash
+  )
+  # stateHashAfter = hash of event with stateHashAfter=""
+  event.stateHashAfter = hashEvent(event)
+  log.events.add(event)
+
+type
+  VerifyResult* = object
+    valid*: bool
+    failedAt*: int       ## 0-based index where verification failed. -1 if valid.
+    error*: string
+
+proc verifyChain*(events: seq[Event]): VerifyResult =
+  ## Verify hash chain integrity.
+  ## Checks: first event parentHash is zeros, each subsequent event's parentHash
+  ## matches hash of previous event, each stateHashAfter is consistent.
+  if events.len == 0:
+    return VerifyResult(valid: true, failedAt: -1, error: "")
+
+  # Check first event
+  if events[0].parentHash != "0".repeat(64):
+    return VerifyResult(valid: false, failedAt: 0,
+      error: "First event parentHash is not zeros")
+
+  # Verify stateHashAfter for first event
+  var checkEvent = events[0]
+  checkEvent.stateHashAfter = ""
+  if events[0].stateHashAfter != hashEvent(checkEvent):
+    return VerifyResult(valid: false, failedAt: 0,
+      error: "First event stateHashAfter mismatch")
+
+  # Check chain
+  for i in 1..<events.len:
+    let expectedParent = hashEvent(events[i - 1])
+    if events[i].parentHash != expectedParent:
+      return VerifyResult(valid: false, failedAt: i,
+        error: "Event " & $i & " parentHash mismatch")
+
+    var check = events[i]
+    check.stateHashAfter = ""
+    if events[i].stateHashAfter != hashEvent(check):
+      return VerifyResult(valid: false, failedAt: i,
+        error: "Event " & $i & " stateHashAfter mismatch")
+
+  return VerifyResult(valid: true, failedAt: -1, error: "")

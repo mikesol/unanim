@@ -2,6 +2,7 @@
 
 import ../src/unanim/eventlog
 import std/json
+import std/strutils
 
 # ---- Task 2: Type definitions ----
 
@@ -195,5 +196,87 @@ block:
   assert cf == "7|2026-04-01T10:00:00Z|cron_result|2|{\"job\": \"daily\"}|stateabc|parentdef",
     "Canonical form mismatch: " & cf
   echo "test_eventlog: Task 5d passed (canonicalForm format)."
+
+# --- Task 6: Hash chain construction ---
+block testEventLogAppend:
+  var log = newEventLog()
+  doAssert log.len == 0
+  log.append(EventType.UserAction, 1, """{"action":"create"}""")
+  doAssert log.len == 1
+  doAssert log[0].sequence == 1
+  doAssert log[0].parentHash == "0".repeat(64), "First event parentHash should be zeros"
+  doAssert log[0].stateHashAfter.len == 64, "stateHashAfter should be set"
+
+echo "test_eventlog: Task 6a passed."
+
+block testEventLogChain:
+  var log = newEventLog()
+  log.append(EventType.UserAction, 1, """{"action":"create"}""")
+  log.append(EventType.ApiResponse, 1, """{"status":200}""")
+  log.append(EventType.UserAction, 1, """{"action":"update"}""")
+  doAssert log.len == 3
+  doAssert log[0].sequence == 1
+  doAssert log[1].sequence == 2
+  doAssert log[2].sequence == 3
+  doAssert log[1].parentHash == hashEvent(log[0])
+  doAssert log[2].parentHash == hashEvent(log[1])
+
+echo "test_eventlog: Task 6b passed."
+
+# --- Task 7: Hash chain verification ---
+block testVerifyValidChain:
+  var log = newEventLog()
+  log.append(EventType.UserAction, 1, """{"a":1}""")
+  log.append(EventType.ApiResponse, 1, """{"b":2}""")
+  log.append(EventType.UserAction, 1, """{"c":3}""")
+  let result = verifyChain(log.events)
+  doAssert result.valid, "Valid chain should verify: " & result.error
+
+echo "test_eventlog: Task 7a passed."
+
+block testVerifyTamperedPayload:
+  var log = newEventLog()
+  log.append(EventType.UserAction, 1, """{"a":1}""")
+  log.append(EventType.ApiResponse, 1, """{"b":2}""")
+  log.append(EventType.UserAction, 1, """{"c":3}""")
+  log.events[1].payload = """{"b":999}"""
+  let result = verifyChain(log.events)
+  doAssert not result.valid, "Tampered chain should fail"
+  doAssert result.failedAt == 1, "Should identify event 1 as broken (its stateHashAfter no longer matches tampered payload)"
+
+echo "test_eventlog: Task 7b passed."
+
+block testVerifyTamperedSequence:
+  var log = newEventLog()
+  log.append(EventType.UserAction, 1, """{"a":1}""")
+  log.append(EventType.UserAction, 1, """{"b":2}""")
+  log.events[0].sequence = 99
+  let result = verifyChain(log.events)
+  doAssert not result.valid, "Tampered sequence should fail"
+
+echo "test_eventlog: Task 7c passed."
+
+block testVerifyEmptyChain:
+  let result = verifyChain(@[])
+  doAssert result.valid, "Empty chain should be valid"
+
+echo "test_eventlog: Task 7d passed."
+
+block testVerifySingleEvent:
+  var log = newEventLog()
+  log.append(EventType.UserAction, 1, """{"a":1}""")
+  let result = verifyChain(log.events)
+  doAssert result.valid, "Single event chain should be valid"
+
+echo "test_eventlog: Task 7e passed."
+
+block testVerifyBadFirstParent:
+  var log = newEventLog()
+  log.append(EventType.UserAction, 1, """{"a":1}""")
+  log.events[0].parentHash = "badhash"
+  let result = verifyChain(log.events)
+  doAssert not result.valid, "Bad first parentHash should fail"
+
+echo "test_eventlog: Task 7f passed."
 
 echo "All eventlog tests passed."
