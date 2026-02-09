@@ -26,6 +26,25 @@ PR body must include:
 - **Spec compliance**: For each VISION.md section referenced in the issue, confirm how the implementation matches. Any deviation must reference an approved `spec-change` issue.
 - **Validation performed**: What you tested against real Cloudflare/browser. Evidence, not claims.
 
+## Required skills for all workflow operations
+
+**You MUST use the superpowers skills for brainstorming, planning, worktree management, and sub-agent dispatch.** Do NOT hand-roll these operations with raw Task tool calls — the skills handle permissions, directory routing, and agent coordination correctly. Raw background agents WILL fail on file writes due to auto-denied permissions.
+
+| Operation | Required skill |
+|---|---|
+| Creative/design work before implementation | `superpowers:brainstorming` |
+| Writing implementation plans | `superpowers:writing-plans` |
+| Creating/managing git worktrees | `superpowers:using-git-worktrees` |
+| Dispatching parallel sub-agents | `superpowers:dispatching-parallel-agents` |
+| Executing plans with sub-agents (same session) | `superpowers:subagent-driven-development` |
+| Executing plans (separate session) | `superpowers:executing-plans` |
+| Finishing a branch (merge/PR/cleanup) | `superpowers:finishing-a-development-branch` |
+| Code review | `superpowers:requesting-code-review` |
+| Verifying work before claiming done | `superpowers:verification-before-completion` |
+| TDD workflow | `superpowers:test-driven-development` |
+
+**Never** use `run_in_background: true` with the Task tool for implementation work. Background agents cannot prompt for permissions and will silently fail or write to wrong directories.
+
 ## Standing rules
 
 - **Ejectability by design**: Generated artifacts must be independently runnable without the framework. Always.
