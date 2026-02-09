@@ -270,8 +270,10 @@ export class UserDO {
 }
 """
 
-proc generateWranglerToml*(appName: string, secrets: seq[string]): string =
+proc generateWranglerToml*(appName: string, secrets: seq[string],
+                           hasDO: bool = false): string =
   ## Generate a wrangler.toml configuration file for the Cloudflare Worker.
+  ## When hasDO is true, includes Durable Object bindings and migrations.
   ##
   ## SCAFFOLD(phase1, #4): Minimal config for stateless Worker.
   ## Phase 2 adds DO bindings, D1 bindings, R2 bindings.
@@ -302,6 +304,13 @@ proc generateWranglerToml*(appName: string, secrets: seq[string]): string =
   if secrets.len > 0:
     result &= "\n# [IMPORTANT] Secrets must be set via `wrangler secret put`, not in this file.\n"
     result &= "# The Worker reads them from env." & sanitizeEnvVar(secrets[0]) & " etc.\n"
+
+  if hasDO:
+    result &= "\n[durable_objects]\n"
+    result &= "bindings = [{ name = \"USER_DO\", class_name = \"UserDO\" }]\n"
+    result &= "\n[[migrations]]\n"
+    result &= "tag = \"v1\"\n"
+    result &= "new_classes = [\"UserDO\"]\n"
 
 proc generateArtifacts*(appName: string, outputDir: string) {.compileTime.} =
   ## Generate all Cloudflare Worker artifacts at compile time.

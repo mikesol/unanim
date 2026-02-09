@@ -270,4 +270,26 @@ block testDurableObjectCors:
 
 echo "test_codegen: Task 15 passed."
 
+# --- Task 16: generateWranglerToml with DO bindings ---
+block testWranglerTomlWithDO:
+  let toml = generateWranglerToml("do-app", @["openai-key"], hasDO = true)
+  doAssert "name = \"do-app\"" in toml
+  doAssert "[durable_objects]" in toml
+  doAssert "USER_DO" in toml
+  doAssert "UserDO" in toml
+  doAssert "[[migrations]]" in toml
+  doAssert "tag = \"v1\"" in toml
+  doAssert "new_classes" in toml
+  doAssert "OPENAI_KEY" in toml
+
+echo "test_codegen: Task 16 passed."
+
+# --- Task 17: generateWranglerToml without DO (backwards compat) ---
+block testWranglerTomlWithoutDO:
+  let toml = generateWranglerToml("no-do-app", @[])
+  doAssert "[durable_objects]" notin toml
+  doAssert "[[migrations]]" notin toml
+
+echo "test_codegen: Task 17 passed."
+
 echo "All codegen tests passed."
