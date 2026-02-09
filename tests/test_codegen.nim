@@ -245,7 +245,7 @@ block testDurableObjectEndpoints:
   let js = generateDurableObjectJs()
   doAssert "storeEvents" in js,
     "DO should have storeEvents method"
-  doAssert "INSERT OR REPLACE INTO events" in js,
+  doAssert "INSERT INTO events" in js,
     "DO should insert events into SQLite"
   doAssert "getEvents" in js,
     "DO should have getEvents method"

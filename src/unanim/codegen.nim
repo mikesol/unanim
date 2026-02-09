@@ -262,7 +262,7 @@ export class UserDO {
 
     for (const event of events) {
       this.sql.exec(
-        `INSERT OR REPLACE INTO events (sequence, timestamp, event_type, schema_version, payload, state_hash_after, parent_hash) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO events (sequence, timestamp, event_type, schema_version, payload, state_hash_after, parent_hash) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         event.sequence,
         event.timestamp,
         event.event_type,
