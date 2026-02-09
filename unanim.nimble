@@ -7,6 +7,7 @@ srcDir        = "src"
 
 # Dependencies
 requires "nim >= 2.0.0"
+requires "nimcrypto >= 0.6.0"
 
 # Tasks
 task test, "Run tests":
@@ -17,3 +18,4 @@ task test, "Run tests":
   exec "nim c -r tests/test_codegen.nim"
   exec "nim c -r tests/test_clientgen.nim"
   exec "nim c -r tests/test_clientgen_jscompile.nim"
+  exec "nim c -r tests/test_eventlog.nim"
