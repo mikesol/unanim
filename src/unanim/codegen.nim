@@ -26,123 +26,290 @@ proc sanitizeEnvVar*(name: string): string =
   ## Convert a secret name like "openai-key" to an env var like "OPENAI_KEY"
   result = name.toUpperAscii().replace("-", "_").replace(".", "_")
 
-proc generateWorkerJs*(secrets: seq[string], routes: seq[RouteInfo]): string =
+proc generateWorkerJs*(secrets: seq[string], routes: seq[RouteInfo],
+                       hasDO: bool = false): string =
   ## Generate a standalone Cloudflare Worker JS file (ES modules format).
   ## The Worker:
   ## - Accepts POST requests with JSON body containing target URL and headers
   ## - Reads secrets from env, replaces <<SECRET:name>> placeholders
   ## - Forwards the request to the target URL
   ## - Returns the response
+  ## When hasDO is true, also routes /do/* requests to Durable Objects.
   ##
   ## SCAFFOLD(phase1, #4): This is a simplified v1 stateless router.
   ## Phase 2 adds DOs, Phase 3 adds sync, Phase 4 adds auth/webhooks/cron.
 
-  result = """// Unanim Generated Cloudflare Worker
-// SCAFFOLD(phase1, #4): Stateless router with credential injection.
-// This Worker is standalone — copy to a fresh Cloudflare project and it works.
+  # CORS configuration varies based on DO support
+  let corsMethods = if hasDO: "GET, POST, OPTIONS" else: "POST, OPTIONS"
+  let corsHeaders = if hasDO: "Content-Type, X-User-Id" else: "Content-Type"
 
-export default {
-  async fetch(request, env, ctx) {
+  # Section 1: Header and fetch handler opening
+  result = "// Unanim Generated Cloudflare Worker\n"
+  result &= "// SCAFFOLD(phase1, #4): Stateless router with credential injection.\n"
+  result &= "// This Worker is standalone — copy to a fresh Cloudflare project and it works.\n"
+  result &= "\n"
+  result &= "export default {\n"
+  result &= "  async fetch(request, env, ctx) {\n"
+
+  # Section 2: CORS preflight handler
+  result &= "    // Handle CORS preflight\n"
+  result &= "    if (request.method === \"OPTIONS\") {\n"
+  result &= "      return new Response(null, {\n"
+  result &= "        status: 204,\n"
+  result &= "        headers: {\n"
+  result &= "          \"Access-Control-Allow-Origin\": \"*\",\n"
+  result &= "          \"Access-Control-Allow-Methods\": \"" & corsMethods & "\",\n"
+  result &= "          \"Access-Control-Allow-Headers\": \"" & corsHeaders & "\",\n"
+  result &= "        },\n"
+  result &= "      });\n"
+  result &= "    }\n"
+
+  # Section 3: DO routing (only when hasDO is true)
+  if hasDO:
+    result &= "\n"
+    result &= "    // Route /do/* requests to Durable Objects\n"
+    result &= "    const reqUrl = new URL(request.url);\n"
+    result &= "    if (reqUrl.pathname.startsWith(\"/do/\")) {\n"
+    result &= "      const userId = request.headers.get(\"X-User-Id\") || reqUrl.searchParams.get(\"user_id\");\n"
+    result &= "      if (!userId) {\n"
+    result &= "        return new Response(JSON.stringify({ error: \"Missing user ID. Provide X-User-Id header or user_id query param.\" }), {\n"
+    result &= "          status: 400,\n"
+    result &= "          headers: { \"Content-Type\": \"application/json\", \"Access-Control-Allow-Origin\": \"*\" },\n"
+    result &= "        });\n"
+    result &= "      }\n"
+    result &= "      const doId = env.USER_DO.idFromName(userId);\n"
+    result &= "      const doStub = env.USER_DO.get(doId);\n"
+    result &= "      const doPath = reqUrl.pathname.replace(/^\\/do/, \"\");\n"
+    result &= "      const doUrl = new URL(doPath + reqUrl.search, request.url);\n"
+    result &= "      return doStub.fetch(new Request(doUrl, request));\n"
+    result &= "    }\n"
+
+  # Section 4: POST-only check and proxy logic
+  result &= "\n"
+  result &= "    // Only accept POST requests\n"
+  result &= "    if (request.method !== \"POST\") {\n"
+  result &= "      return new Response(JSON.stringify({ error: \"Method not allowed. Use POST.\" }), {\n"
+  result &= "        status: 405,\n"
+  result &= "        headers: { \"Content-Type\": \"application/json\", \"Access-Control-Allow-Origin\": \"*\" },\n"
+  result &= "      });\n"
+  result &= "    }\n"
+  result &= "\n"
+  result &= "    let body;\n"
+  result &= "    try {\n"
+  result &= "      body = await request.json();\n"
+  result &= "    } catch (e) {\n"
+  result &= "      return new Response(JSON.stringify({ error: \"Invalid JSON body.\" }), {\n"
+  result &= "        status: 400,\n"
+  result &= "        headers: { \"Content-Type\": \"application/json\", \"Access-Control-Allow-Origin\": \"*\" },\n"
+  result &= "      });\n"
+  result &= "    }\n"
+  result &= "\n"
+  result &= "    const { url, headers, method, requestBody } = body;\n"
+  result &= "\n"
+  result &= "    if (!url) {\n"
+  result &= "      return new Response(JSON.stringify({ error: \"Missing 'url' in request body.\" }), {\n"
+  result &= "        status: 400,\n"
+  result &= "        headers: { \"Content-Type\": \"application/json\", \"Access-Control-Allow-Origin\": \"*\" },\n"
+  result &= "      });\n"
+  result &= "    }\n"
+  result &= "\n"
+
+  # Section 5: Secret injection function
+  result &= "    // Inject secrets: replace <<SECRET:name>> placeholders with env values\n"
+  result &= "    function injectSecrets(value) {\n"
+  result &= "      if (typeof value !== \"string\") return value;\n"
+  result &= "      return value.replace(/<<SECRET:([^>]+)>>/g, (match, secretName) => {\n"
+  result &= "        const envKey = secretName.toUpperCase().replace(/-/g, \"_\").replace(/\\./g, \"_\");\n"
+  result &= "        const secretValue = env[envKey];\n"
+  result &= "        if (secretValue === undefined) {\n"
+  result &= "          throw new Error(`Secret \"${secretName}\" (env: ${envKey}) is not configured.`);\n"
+  result &= "        }\n"
+  result &= "        return secretValue;\n"
+  result &= "      });\n"
+  result &= "    }\n"
+  result &= "\n"
+
+  # Section 6: Secret resolution into headers, URL, body
+  result &= "    // Inject secrets into headers\n"
+  result &= "    const resolvedHeaders = {};\n"
+  result &= "    if (headers && typeof headers === \"object\") {\n"
+  result &= "      for (const [key, value] of Object.entries(headers)) {\n"
+  result &= "        resolvedHeaders[key] = injectSecrets(value);\n"
+  result &= "      }\n"
+  result &= "    }\n"
+  result &= "\n"
+  result &= "    // Inject secrets into URL (in case secret is embedded in URL)\n"
+  result &= "    const resolvedUrl = injectSecrets(url);\n"
+  result &= "\n"
+  result &= "    // Inject secrets into request body if it's a string\n"
+  result &= "    let resolvedBody = requestBody;\n"
+  result &= "    if (typeof resolvedBody === \"string\") {\n"
+  result &= "      resolvedBody = injectSecrets(resolvedBody);\n"
+  result &= "    } else if (resolvedBody !== undefined && resolvedBody !== null) {\n"
+  result &= "      resolvedBody = JSON.stringify(resolvedBody);\n"
+  result &= "    }\n"
+  result &= "\n"
+
+  # Section 7: Forward request and return response
+  result &= "    // Forward the request\n"
+  result &= "    try {\n"
+  result &= "      const response = await fetch(resolvedUrl, {\n"
+  result &= "        method: method || \"POST\",\n"
+  result &= "        headers: resolvedHeaders,\n"
+  result &= "        body: resolvedBody,\n"
+  result &= "      });\n"
+  result &= "\n"
+  result &= "      const responseBody = await response.text();\n"
+  result &= "\n"
+  result &= "      return new Response(responseBody, {\n"
+  result &= "        status: response.status,\n"
+  result &= "        headers: {\n"
+  result &= "          \"Content-Type\": response.headers.get(\"Content-Type\") || \"application/octet-stream\",\n"
+  result &= "          \"Access-Control-Allow-Origin\": \"*\",\n"
+  result &= "        },\n"
+  result &= "      });\n"
+  result &= "    } catch (e) {\n"
+  result &= "      return new Response(JSON.stringify({ error: \"Upstream request failed: \" + e.message }), {\n"
+  result &= "        status: 502,\n"
+  result &= "        headers: { \"Content-Type\": \"application/json\", \"Access-Control-Allow-Origin\": \"*\" },\n"
+  result &= "      });\n"
+  result &= "    }\n"
+  result &= "  },\n"
+  result &= "};\n"
+
+proc generateDurableObjectJs*(): string =
+  ## Generate a Durable Object ES module class with SQLite event storage.
+  ## The DO:
+  ## - Creates an events table in SQLite on initialization
+  ## - Stores events via POST /events
+  ## - Retrieves events via GET /events?since=N
+  ## - Reports status via GET /status
+  ## - Handles CORS preflight
+  ##
+  ## See VISION.md Section 4.2 (The Event Log)
+  result = """// Unanim Generated Durable Object
+// Event storage backed by SQLite via Cloudflare Durable Objects.
+// This class is standalone — copy to a fresh Cloudflare project and it works.
+
+export class UserDO {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.sql = state.storage.sql;
+    this.state.blockConcurrencyWhile(async () => {
+      await this.initialize();
+    });
+  }
+
+  async initialize() {
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS events (
+      sequence INTEGER PRIMARY KEY,
+      timestamp TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      schema_version INTEGER NOT NULL,
+      payload TEXT NOT NULL,
+      state_hash_after TEXT NOT NULL,
+      parent_hash TEXT NOT NULL
+    )`);
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
     // Handle CORS preflight
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
         headers: {
           "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type",
         },
       });
     }
 
-    // Only accept POST requests
-    if (request.method !== "POST") {
-      return new Response(JSON.stringify({ error: "Method not allowed. Use POST." }), {
-        status: 405,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-      });
-    }
+    const corsHeaders = {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+    };
 
-    let body;
     try {
-      body = await request.json();
-    } catch (e) {
-      return new Response(JSON.stringify({ error: "Invalid JSON body." }), {
-        status: 400,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-      });
-    }
-
-    const { url, headers, method, requestBody } = body;
-
-    if (!url) {
-      return new Response(JSON.stringify({ error: "Missing 'url' in request body." }), {
-        status: 400,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-      });
-    }
-
-    // Inject secrets: replace <<SECRET:name>> placeholders with env values
-    function injectSecrets(value) {
-      if (typeof value !== "string") return value;
-      return value.replace(/<<SECRET:([^>]+)>>/g, (match, secretName) => {
-        const envKey = secretName.toUpperCase().replace(/-/g, "_").replace(/\./g, "_");
-        const secretValue = env[envKey];
-        if (secretValue === undefined) {
-          throw new Error(`Secret "${secretName}" (env: ${envKey}) is not configured.`);
-        }
-        return secretValue;
-      });
-    }
-
-    // Inject secrets into headers
-    const resolvedHeaders = {};
-    if (headers && typeof headers === "object") {
-      for (const [key, value] of Object.entries(headers)) {
-        resolvedHeaders[key] = injectSecrets(value);
+      if (path === "/events" && request.method === "POST") {
+        return await this.storeEvents(request, corsHeaders);
+      } else if (path === "/events" && request.method === "GET") {
+        const since = parseInt(url.searchParams.get("since") || "0", 10);
+        return await this.getEvents(since, corsHeaders);
+      } else if (path === "/status" && request.method === "GET") {
+        return await this.getStatus(corsHeaders);
+      } else {
+        return new Response(JSON.stringify({ error: "Not found" }), {
+          status: 404,
+          headers: corsHeaders,
+        });
       }
-    }
-
-    // Inject secrets into URL (in case secret is embedded in URL)
-    const resolvedUrl = injectSecrets(url);
-
-    // Inject secrets into request body if it's a string
-    let resolvedBody = requestBody;
-    if (typeof resolvedBody === "string") {
-      resolvedBody = injectSecrets(resolvedBody);
-    } else if (resolvedBody !== undefined && resolvedBody !== null) {
-      resolvedBody = JSON.stringify(resolvedBody);
-    }
-
-    // Forward the request
-    try {
-      const response = await fetch(resolvedUrl, {
-        method: method || "POST",
-        headers: resolvedHeaders,
-        body: resolvedBody,
-      });
-
-      const responseBody = await response.text();
-
-      return new Response(responseBody, {
-        status: response.status,
-        headers: {
-          "Content-Type": response.headers.get("Content-Type") || "application/octet-stream",
-          "Access-Control-Allow-Origin": "*",
-        },
-      });
     } catch (e) {
-      return new Response(JSON.stringify({ error: "Upstream request failed: " + e.message }), {
-        status: 502,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+      return new Response(JSON.stringify({ error: e.message }), {
+        status: 500,
+        headers: corsHeaders,
       });
     }
-  },
-};
+  }
+
+  async storeEvents(request, corsHeaders) {
+    const body = await request.json();
+    const events = Array.isArray(body) ? body : [body];
+
+    for (const event of events) {
+      this.sql.exec(
+        `INSERT INTO events (sequence, timestamp, event_type, schema_version, payload, state_hash_after, parent_hash) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        event.sequence,
+        event.timestamp,
+        event.event_type,
+        event.schema_version,
+        event.payload,
+        event.state_hash_after,
+        event.parent_hash
+      );
+    }
+
+    return new Response(JSON.stringify({ stored: events.length }), {
+      status: 200,
+      headers: corsHeaders,
+    });
+  }
+
+  async getEvents(since, corsHeaders) {
+    const rows = this.sql.exec(
+      `SELECT sequence, timestamp, event_type, schema_version, payload, state_hash_after, parent_hash FROM events WHERE sequence > ? ORDER BY sequence ASC`,
+      since
+    ).toArray();
+
+    return new Response(JSON.stringify(rows), {
+      status: 200,
+      headers: corsHeaders,
+    });
+  }
+
+  async getStatus(corsHeaders) {
+    const countResult = this.sql.exec(`SELECT COUNT(*) as count FROM events`).one();
+    const latestResult = this.sql.exec(`SELECT MAX(sequence) as latest FROM events`).one();
+
+    return new Response(JSON.stringify({
+      event_count: countResult.count,
+      latest_sequence: latestResult.latest || 0,
+    }), {
+      status: 200,
+      headers: corsHeaders,
+    });
+  }
+}
 """
 
-proc generateWranglerToml*(appName: string, secrets: seq[string]): string =
+proc generateWranglerToml*(appName: string, secrets: seq[string],
+                           hasDO: bool = false): string =
   ## Generate a wrangler.toml configuration file for the Cloudflare Worker.
+  ## When hasDO is true, includes Durable Object bindings and migrations.
   ##
   ## SCAFFOLD(phase1, #4): Minimal config for stateless Worker.
   ## Phase 2 adds DO bindings, D1 bindings, R2 bindings.
@@ -173,6 +340,13 @@ proc generateWranglerToml*(appName: string, secrets: seq[string]): string =
   if secrets.len > 0:
     result &= "\n# [IMPORTANT] Secrets must be set via `wrangler secret put`, not in this file.\n"
     result &= "# The Worker reads them from env." & sanitizeEnvVar(secrets[0]) & " etc.\n"
+
+  if hasDO:
+    result &= "\n[durable_objects]\n"
+    result &= "bindings = [{ name = \"USER_DO\", class_name = \"UserDO\" }]\n"
+    result &= "\n[[migrations]]\n"
+    result &= "tag = \"v1\"\n"
+    result &= "new_sqlite_classes = [\"UserDO\"]\n"
 
 proc generateArtifacts*(appName: string, outputDir: string) {.compileTime.} =
   ## Generate all Cloudflare Worker artifacts at compile time.
@@ -208,11 +382,13 @@ proc generateArtifacts*(appName: string, outputDir: string) {.compileTime.} =
       ))
       inc routeIndex
 
-  # Generate the JS and TOML
-  let workerJs = generateWorkerJs(secrets, routes)
-  let wranglerToml = generateWranglerToml(appName, secrets)
+  # Generate the JS and TOML — always include DO for Phase 1+
+  let workerJs = generateWorkerJs(secrets, routes, hasDO = true)
+  let durableObjectJs = generateDurableObjectJs()
+  let combinedJs = workerJs & "\n" & durableObjectJs
+  let wranglerToml = generateWranglerToml(appName, secrets, hasDO = true)
 
   # Create output directory and write files
   discard gorge("mkdir -p " & outputDir)
-  writeFile(outputDir & "/worker.js", workerJs)
+  writeFile(outputDir & "/worker.js", combinedJs)
   writeFile(outputDir & "/wrangler.toml", wranglerToml)
