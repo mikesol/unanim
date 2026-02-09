@@ -14,3 +14,4 @@ task test, "Run tests":
   exec "nim c -r tests/test_secret.nim"
   exec "nim c -r tests/test_secret_errors.nim"
   exec "nim c -r tests/test_proxyfetch.nim"
+  exec "nim c -r tests/test_codegen.nim"
