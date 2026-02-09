@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Unanim E2E Validation</title>
+  <style>
+    body { font-family: monospace; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+    pre { background: #f4f4f4; padding: 16px; overflow-x: auto; }
+    button { padding: 10px 20px; font-size: 16px; cursor: pointer; }
+    .pass { color: green; font-weight: bold; }
+    .fail { color: red; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>Unanim Phase 1: E2E Validation</h1>
+  <p>This page calls a real Cloudflare Worker that injects secrets and proxies to httpbin.org.</p>
+
+  <button id="trigger">Trigger proxyFetch round-trip</button>
+
+  <h2>Results</h2>
+  <div id="results">Click the button to start.</div>
+
+  <script>
+    // WORKER_URL will be replaced with the actual deployed URL after wrangler deploy
+    const WORKER_URL = "https://unanim-e2e-test.mike-solomon.workers.dev";
+
+    document.getElementById("trigger").addEventListener("click", async () => {
+      const resultsDiv = document.getElementById("results");
+      resultsDiv.innerHTML = "Running...";
+
+      const startTime = performance.now();
+
+      try {
+        const response = await fetch(WORKER_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://httpbin.org/anything",
+            headers: {
+              "Authorization": "Bearer <<SECRET:test-api-key>>",
+              "X-Custom": "no-secret-here"
+            },
+            requestBody: "hello from unanim e2e test"
+          })
+        });
+
+        const endTime = performance.now();
+        const latencyMs = (endTime - startTime).toFixed(1);
+
+        const data = await response.json();
+
+        const checks = [];
+
+        checks.push({
+          name: "Response received",
+          pass: response.status === 200,
+          detail: `Status: ${response.status}`
+        });
+
+        const authHeader = data.headers?.Authorization || data.headers?.authorization || "";
+        const secretInjected = authHeader.includes("unanim-test-secret-12345");
+        checks.push({
+          name: "Secret injected by Worker",
+          pass: secretInjected,
+          detail: `Authorization header: ${authHeader}`
+        });
+
+        const placeholderLeaked = JSON.stringify(data).includes("<<SECRET:");
+        checks.push({
+          name: "No secret placeholder leaked",
+          pass: !placeholderLeaked,
+          detail: placeholderLeaked ? "LEAKED: found in response" : "Clean"
+        });
+
+        const customHeader = data.headers?.["X-Custom"] || data.headers?.["x-custom"] || "";
+        checks.push({
+          name: "Non-secret header preserved",
+          pass: customHeader === "no-secret-here",
+          detail: `X-Custom: ${customHeader}`
+        });
+
+        const bodyReceived = data.data || "";
+        checks.push({
+          name: "Request body forwarded",
+          pass: bodyReceived.includes("hello from unanim"),
+          detail: `Body: ${bodyReceived}`
+        });
+
+        let html = `<p>Round-trip latency: <strong>${latencyMs}ms</strong></p>`;
+        html += "<ul>";
+        for (const check of checks) {
+          const cls = check.pass ? "pass" : "fail";
+          const icon = check.pass ? "PASS" : "FAIL";
+          html += `<li><span class="${cls}">[${icon}]</span> ${check.name} — ${check.detail}</li>`;
+        }
+        html += "</ul>";
+        html += `<h3>Raw httpbin response:</h3><pre>${JSON.stringify(data, null, 2)}</pre>`;
+
+        resultsDiv.innerHTML = html;
+
+      } catch (err) {
+        const endTime = performance.now();
+        resultsDiv.innerHTML = `<p class="fail">ERROR: ${err.message}</p><p>Latency: ${(endTime - startTime).toFixed(1)}ms</p>`;
+      }
+    });
+  </script>
+</body>
+</html>
