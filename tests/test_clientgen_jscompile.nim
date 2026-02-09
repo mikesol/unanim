@@ -106,4 +106,35 @@ block testMixedRewriting:
     "Direct call should keep original URL, got: " & source
 
 echo "test_clientgen_jscompile: Test 5 passed."
+
+# Test 6: Compile rewritten Nim to JS and verify output
+# This test uses compileClientJs to actually invoke nim js at compile time
+block testNimJsCompilationNoSecrets:
+  # A minimal Nim program that uses our rewritten fetch pattern
+  # (We can't use the macro directly in the string -- we write pre-rewritten code)
+  const js = compileClientJs("""
+    proc fetch(url: string): string = ""
+    proc encodeURIComponent(s: string): string = s
+
+    proc main() =
+      # Simulates what rewriteProxyFetch would produce for a ProxyRequired call
+      let result = fetch("https://my-app.workers.dev/proxy?target=https://api.openai.com/v1/chat")
+      # Simulates what rewriteProxyFetch would produce for a DirectFetch call
+      let direct = fetch("https://api.example.com/public")
+
+    main()
+  """)
+
+  doAssert js.len > 0, "Compiled JS should not be empty"
+
+  # Verify no secret placeholders leaked into the JS
+  let leaked = scanForSecrets(js, @["openai-key", "fal-key", "custom-key"])
+  doAssert leaked.len == 0,
+    "Compiled JS should contain no secret placeholders, but found: " & $leaked
+
+  # Verify the JS does not contain the literal string "<<SECRET:"
+  doAssert "<<SECRET:" notin js,
+    "Compiled JS should not contain any secret placeholder pattern"
+
+echo "test_clientgen_jscompile: Test 6 passed."
 echo "All client codegen integration tests passed."
