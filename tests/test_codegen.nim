@@ -321,4 +321,51 @@ block testWorkerCorsWithDO:
 
 echo "test_codegen: Task 20 passed."
 
+# --- Task 21: End-to-end artifacts include DO ---
+block testGenerateArtifactsWithDO:
+  const outputDir = "/tmp/unanim_test_codegen"
+  let workerJs = readFile(outputDir / "worker.js")
+  doAssert "export class UserDO" in workerJs,
+    "worker.js should include UserDO class"
+  doAssert "CREATE TABLE IF NOT EXISTS events" in workerJs,
+    "worker.js should include SQLite table creation"
+  doAssert "export default" in workerJs,
+    "worker.js should still have default Worker export"
+  let wranglerToml = readFile(outputDir / "wrangler.toml")
+  doAssert "[durable_objects]" in wranglerToml,
+    "wrangler.toml should have DO section"
+  doAssert "UserDO" in wranglerToml,
+    "wrangler.toml should reference UserDO"
+  doAssert "[[migrations]]" in wranglerToml,
+    "wrangler.toml should have migrations"
+
+echo "test_codegen: Task 21 passed."
+
+# --- Task 22: Node syntax validation for combined Worker+DO ---
+block testCombinedJsSyntax:
+  const outputDir = "/tmp/unanim_test_codegen"
+  const nodeCheck = gorgeEx("which node")
+  when nodeCheck[1] == 0:
+    const checkResult = gorgeEx("node --check " & outputDir & "/worker.js")
+    doAssert checkResult[1] == 0,
+      "Combined worker.js (Worker+DO) should be syntactically valid JS. Error: " & checkResult[0]
+    echo "test_codegen: Task 22 passed (node --check verified)."
+  else:
+    echo "test_codegen: Task 22 skipped (node not available)."
+
+# --- Task 23: Ejectability for combined output ---
+block testCombinedEjectability:
+  const outputDir = "/tmp/unanim_test_codegen"
+  let workerJs = readFile(outputDir / "worker.js")
+  doAssert not workerJs.contains("import unanim"),
+    "Combined worker.js must be standalone -- no framework imports"
+  doAssert not workerJs.contains("require(\"unanim"),
+    "Combined worker.js must be standalone -- no framework requires"
+  doAssert "export default" in workerJs,
+    "Combined worker.js must have default Worker export"
+  doAssert "export class UserDO" in workerJs,
+    "Combined worker.js must have named DO export"
+
+echo "test_codegen: Task 23 passed."
+
 echo "All codegen tests passed."

@@ -382,11 +382,13 @@ proc generateArtifacts*(appName: string, outputDir: string) {.compileTime.} =
       ))
       inc routeIndex
 
-  # Generate the JS and TOML
-  let workerJs = generateWorkerJs(secrets, routes)
-  let wranglerToml = generateWranglerToml(appName, secrets)
+  # Generate the JS and TOML — always include DO for Phase 1+
+  let workerJs = generateWorkerJs(secrets, routes, hasDO = true)
+  let durableObjectJs = generateDurableObjectJs()
+  let combinedJs = workerJs & "\n" & durableObjectJs
+  let wranglerToml = generateWranglerToml(appName, secrets, hasDO = true)
 
   # Create output directory and write files
   discard gorge("mkdir -p " & outputDir)
-  writeFile(outputDir & "/worker.js", workerJs)
+  writeFile(outputDir & "/worker.js", combinedJs)
   writeFile(outputDir & "/wrangler.toml", wranglerToml)
