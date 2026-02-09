@@ -141,6 +141,135 @@ export default {
 };
 """
 
+proc generateDurableObjectJs*(): string =
+  ## Generate a Durable Object ES module class with SQLite event storage.
+  ## The DO:
+  ## - Creates an events table in SQLite on initialization
+  ## - Stores events via POST /events
+  ## - Retrieves events via GET /events?since=N
+  ## - Reports status via GET /status
+  ## - Handles CORS preflight
+  ##
+  ## See VISION.md Section 4.2 (The Event Log)
+  result = """// Unanim Generated Durable Object
+// Event storage backed by SQLite via Cloudflare Durable Objects.
+// This class is standalone — copy to a fresh Cloudflare project and it works.
+
+export class UserDO {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.sql = state.storage.sql;
+    this.state.blockConcurrencyWhile(async () => {
+      await this.initialize();
+    });
+  }
+
+  async initialize() {
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS events (
+      sequence INTEGER PRIMARY KEY,
+      timestamp TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      schema_version INTEGER NOT NULL,
+      payload TEXT NOT NULL,
+      state_hash_after TEXT NOT NULL,
+      parent_hash TEXT NOT NULL
+    )`);
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // Handle CORS preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+        },
+      });
+    }
+
+    const corsHeaders = {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+    };
+
+    try {
+      if (path === "/events" && request.method === "POST") {
+        return await this.storeEvents(request, corsHeaders);
+      } else if (path === "/events" && request.method === "GET") {
+        const since = parseInt(url.searchParams.get("since") || "0", 10);
+        return await this.getEvents(since, corsHeaders);
+      } else if (path === "/status" && request.method === "GET") {
+        return await this.getStatus(corsHeaders);
+      } else {
+        return new Response(JSON.stringify({ error: "Not found" }), {
+          status: 404,
+          headers: corsHeaders,
+        });
+      }
+    } catch (e) {
+      return new Response(JSON.stringify({ error: e.message }), {
+        status: 500,
+        headers: corsHeaders,
+      });
+    }
+  }
+
+  async storeEvents(request, corsHeaders) {
+    const body = await request.json();
+    const events = Array.isArray(body) ? body : [body];
+
+    for (const event of events) {
+      this.sql.exec(
+        `INSERT OR REPLACE INTO events (sequence, timestamp, event_type, schema_version, payload, state_hash_after, parent_hash) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        event.sequence,
+        event.timestamp,
+        event.event_type,
+        event.schema_version,
+        event.payload,
+        event.state_hash_after,
+        event.parent_hash
+      );
+    }
+
+    return new Response(JSON.stringify({ stored: events.length }), {
+      status: 200,
+      headers: corsHeaders,
+    });
+  }
+
+  async getEvents(since, corsHeaders) {
+    const rows = this.sql.exec(
+      `SELECT sequence, timestamp, event_type, schema_version, payload, state_hash_after, parent_hash FROM events WHERE sequence > ? ORDER BY sequence ASC`,
+      since
+    ).toArray();
+
+    return new Response(JSON.stringify(rows), {
+      status: 200,
+      headers: corsHeaders,
+    });
+  }
+
+  async getStatus(corsHeaders) {
+    const countResult = this.sql.exec(`SELECT COUNT(*) as count FROM events`).one();
+    const latestResult = this.sql.exec(`SELECT MAX(sequence) as latest FROM events`).one();
+
+    return new Response(JSON.stringify({
+      event_count: countResult.count,
+      latest_sequence: latestResult.latest || 0,
+    }), {
+      status: 200,
+      headers: corsHeaders,
+    });
+  }
+}
+"""
+
 proc generateWranglerToml*(appName: string, secrets: seq[string]): string =
   ## Generate a wrangler.toml configuration file for the Cloudflare Worker.
   ##

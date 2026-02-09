@@ -204,4 +204,70 @@ block testCorsHeaders:
 
 echo "test_codegen: Task 11 passed."
 
+# --- Task 12: generateDurableObjectJs basic structure ---
+block testGenerateDurableObjectJsBasic:
+  let js = generateDurableObjectJs()
+  doAssert "export class UserDO" in js,
+    "DO JS should export UserDO class"
+  doAssert "constructor(state, env)" in js,
+    "DO should have constructor with state and env"
+  doAssert "async fetch(request)" in js,
+    "DO should have async fetch method"
+  doAssert "state.storage.sql" in js,
+    "DO should access SQLite via state.storage.sql"
+
+echo "test_codegen: Task 12 passed."
+
+# --- Task 13: DO SQLite table creation ---
+block testDurableObjectSqliteTable:
+  let js = generateDurableObjectJs()
+  doAssert "CREATE TABLE IF NOT EXISTS events" in js,
+    "DO should create events table"
+  doAssert "sequence INTEGER PRIMARY KEY" in js,
+    "Events table should have sequence as primary key"
+  doAssert "timestamp TEXT" in js,
+    "Events table should have timestamp column"
+  doAssert "event_type TEXT" in js,
+    "Events table should have event_type column"
+  doAssert "schema_version INTEGER" in js,
+    "Events table should have schema_version column"
+  doAssert "payload TEXT" in js,
+    "Events table should have payload column"
+  doAssert "state_hash_after TEXT" in js,
+    "Events table should have state_hash_after column"
+  doAssert "parent_hash TEXT" in js,
+    "Events table should have parent_hash column"
+
+echo "test_codegen: Task 13 passed."
+
+# --- Task 14: DO event endpoints ---
+block testDurableObjectEndpoints:
+  let js = generateDurableObjectJs()
+  doAssert "storeEvents" in js,
+    "DO should have storeEvents method"
+  doAssert "INSERT OR REPLACE INTO events" in js,
+    "DO should insert events into SQLite"
+  doAssert "getEvents" in js,
+    "DO should have getEvents method"
+  doAssert "WHERE sequence > ?" in js,
+    "DO should filter events by sequence"
+  doAssert "ORDER BY sequence ASC" in js,
+    "DO should return events ordered by sequence"
+  doAssert "getStatus" in js,
+    "DO should have getStatus method"
+  doAssert "COUNT(*)" in js,
+    "DO status should return event count"
+
+echo "test_codegen: Task 14 passed."
+
+# --- Task 15: DO CORS support ---
+block testDurableObjectCors:
+  let js = generateDurableObjectJs()
+  doAssert "Access-Control-Allow-Origin" in js,
+    "DO should have CORS headers"
+  doAssert "OPTIONS" in js,
+    "DO should handle OPTIONS preflight"
+
+echo "test_codegen: Task 15 passed."
+
 echo "All codegen tests passed."
