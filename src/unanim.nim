@@ -13,3 +13,6 @@ export proxyfetch
 
 import unanim/codegen
 export codegen
+
+import unanim/clientgen
+export clientgen
