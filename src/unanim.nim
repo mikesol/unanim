@@ -4,3 +4,6 @@
 ## in subsequent issues.
 
 const unanimVersion* = "0.1.0"
+
+import unanim/secret
+export secret
