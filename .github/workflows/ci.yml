@@ -17,6 +17,9 @@ jobs:
           nim-version: '2.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install dependencies
+        run: nimble install -dy
+
       - name: Build
         run: nim c src/unanim.nim
 
