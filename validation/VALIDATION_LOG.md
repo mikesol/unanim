@@ -9,7 +9,7 @@
 - Node: v22.14.0
 - Wrangler: 4.59.2
 - OS: Linux 6.17.9-76061709-generic (Pop!_OS)
-- Cloudflare Account: mike.solomon@hey.com
+- Cloudflare Account: (redacted)
 
 ## Step 1: Codegen
 
