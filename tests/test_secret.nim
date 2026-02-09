@@ -34,4 +34,16 @@ block testCollectMultipleSecrets:
     doAssert secrets[1] == "fal-key"
     doAssert secrets[2] == "jwt-signing-key"
 
+block testNestedSecretInConcat:
+  static:
+    let ast = newNimNode(nnkInfix).add(
+      ident("&"),
+      newStrLitNode("Bearer "),
+      newCall(ident("secret"), newStrLitNode("openai-key"))
+    )
+    var secrets: seq[string] = @[]
+    collectSecrets(ast, secrets)
+    doAssert secrets == @["openai-key"],
+      "Should find secret nested in & concat but got: " & $secrets
+
 echo "All secret tests passed."
