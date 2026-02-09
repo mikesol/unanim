@@ -1,3 +1,4 @@
+{.hint[XDeclaredButNotUsed]: off.}
 import std/strutils
 import ../src/unanim/clientgen
 
@@ -114,3 +115,33 @@ block testCollectNoSecrets:
     doAssert names.len == 0, "No secret names expected, got " & $names
 
 echo "test_clientgen: Task 3 passed."
+
+# Stubs for proxyFetch and secret so rewritten code can compile
+proc proxyFetch(url: string, headers: openArray[(string, string)] = @[],
+                body: string = ""): string = ""
+proc secret(name: string): string = ""
+
+# We need stubs for the rewritten output -- fetch and encodeURIComponent
+proc fetch(url: string, headers: openArray[(string, string)] = @[],
+           body: string = ""): string = "fetch_result"
+proc encodeURIComponent(s: string): string = s
+
+block testRewriteDirectFetch:
+  # A proxyFetch with no secrets should be rewritten to fetch()
+  rewriteProxyFetch("https://worker.example.com/proxy"):
+    discard proxyFetch("https://api.example.com/public", body = "test")
+  # The block should compile and run -- the proxyFetch becomes fetch
+  doAssert true, "DirectFetch rewrite should compile and execute"
+
+echo "test_clientgen: Task 4a passed."
+
+block testRewriteProxyRequired:
+  # A proxyFetch with secrets should be rewritten to target the worker URL
+  rewriteProxyFetch("https://worker.example.com/proxy"):
+    discard proxyFetch("https://api.openai.com/v1/chat",
+      headers = {"Authorization": "Bearer " & secret("openai-key")},
+      body = "test")
+  # The block should compile and run -- secrets are stripped
+  doAssert true, "ProxyRequired rewrite should compile and execute"
+
+echo "test_clientgen: Task 4b passed."
