@@ -47,7 +47,6 @@ proc collectSecretNames*(n: NimNode, secrets: var seq[string]) =
   if isCallTo(n, "secret"):
     if n.len > 1 and n[1].kind == nnkStrLit:
       secrets.add(n[1].strVal)
-    return
   for i in 0..<n.len:
     collectSecretNames(n[i], secrets)
 

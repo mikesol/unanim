@@ -1,3 +1,4 @@
+{.hint[XDeclaredButNotUsed]: off.}
 import ../src/unanim/proxyfetch
 
 block testTypesExist:
