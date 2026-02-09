@@ -346,7 +346,7 @@ proc generateWranglerToml*(appName: string, secrets: seq[string],
     result &= "bindings = [{ name = \"USER_DO\", class_name = \"UserDO\" }]\n"
     result &= "\n[[migrations]]\n"
     result &= "tag = \"v1\"\n"
-    result &= "new_classes = [\"UserDO\"]\n"
+    result &= "new_sqlite_classes = [\"UserDO\"]\n"
 
 proc generateArtifacts*(appName: string, outputDir: string) {.compileTime.} =
   ## Generate all Cloudflare Worker artifacts at compile time.

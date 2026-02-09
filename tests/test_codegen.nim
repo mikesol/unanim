@@ -279,7 +279,7 @@ block testWranglerTomlWithDO:
   doAssert "UserDO" in toml
   doAssert "[[migrations]]" in toml
   doAssert "tag = \"v1\"" in toml
-  doAssert "new_classes" in toml
+  doAssert "new_sqlite_classes" in toml
   doAssert "OPENAI_KEY" in toml
 
 echo "test_codegen: Task 16 passed."
