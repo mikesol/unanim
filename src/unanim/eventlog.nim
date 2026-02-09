@@ -155,3 +155,55 @@ proc verifyChain*(events: seq[Event]): VerifyResult =
         error: "Event " & $i & " stateHashAfter mismatch")
 
   return VerifyResult(valid: true, failedAt: -1, error: "")
+
+proc eventsToJson*(events: seq[Event]): JsonNode =
+  ## Serialize a sequence of events to a JSON array.
+  result = newJArray()
+  for e in events:
+    result.add(e.toJson())
+
+proc eventsFromJson*(j: JsonNode): seq[Event] =
+  ## Deserialize a JSON array to a sequence of events.
+  result = @[]
+  for item in j:
+    result.add(eventFromJson(item))
+
+proc eventsSince*(log: EventLog, sinceSequence: uint64): seq[Event] =
+  ## Return all events with sequence > sinceSequence.
+  result = @[]
+  for e in log.events:
+    if e.sequence > sinceSequence:
+      result.add(e)
+
+proc verifyContinuity*(anchor: Event, delta: seq[Event]): VerifyResult =
+  ## Verify that a delta connects to an anchor event and is internally consistent.
+  ## The first delta event's parentHash must equal hashEvent(anchor).
+  if delta.len == 0:
+    return VerifyResult(valid: true, failedAt: -1, error: "")
+
+  # Check connection to anchor
+  let expectedParent = hashEvent(anchor)
+  if delta[0].parentHash != expectedParent:
+    return VerifyResult(valid: false, failedAt: 0,
+      error: "Delta does not connect to anchor")
+
+  # Verify stateHashAfter of first delta event
+  var check = delta[0]
+  check.stateHashAfter = ""
+  if delta[0].stateHashAfter != hashEvent(check):
+    return VerifyResult(valid: false, failedAt: 0,
+      error: "First delta event stateHashAfter mismatch")
+
+  # Verify internal chain of remaining delta events
+  for i in 1..<delta.len:
+    let expParent = hashEvent(delta[i - 1])
+    if delta[i].parentHash != expParent:
+      return VerifyResult(valid: false, failedAt: i,
+        error: "Delta event " & $i & " parentHash mismatch")
+    var chk = delta[i]
+    chk.stateHashAfter = ""
+    if delta[i].stateHashAfter != hashEvent(chk):
+      return VerifyResult(valid: false, failedAt: i,
+        error: "Delta event " & $i & " stateHashAfter mismatch")
+
+  return VerifyResult(valid: true, failedAt: -1, error: "")

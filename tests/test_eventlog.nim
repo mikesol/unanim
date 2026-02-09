@@ -279,4 +279,92 @@ block testVerifyBadFirstParent:
 
 echo "test_eventlog: Task 7f passed."
 
+# --- Task 8: Events array serialization ---
+block testEventsToJson:
+  var log = newEventLog()
+  log.append(EventType.UserAction, 1, """{"a":1}""")
+  log.append(EventType.ApiResponse, 1, """{"b":2}""")
+  let j = eventsToJson(log.events)
+  doAssert j.kind == JArray
+  doAssert j.len == 2
+  doAssert j[0]["sequence"].getInt() == 1
+  doAssert j[1]["sequence"].getInt() == 2
+
+echo "test_eventlog: Task 8a passed."
+
+block testEventsFromJson:
+  var log = newEventLog()
+  log.append(EventType.UserAction, 1, """{"a":1}""")
+  log.append(EventType.ApiResponse, 1, """{"b":2}""")
+  let j = eventsToJson(log.events)
+  let restored = eventsFromJson(j)
+  doAssert restored.len == 2
+  doAssert restored[0].sequence == log[0].sequence
+  doAssert restored[1].eventType == log[1].eventType
+  let result = verifyChain(restored)
+  doAssert result.valid, "Chain should still verify after JSON round-trip: " & result.error
+
+echo "test_eventlog: Task 8b passed."
+
+# --- Task 9: Delta extraction ---
+block testEventsSince:
+  var log = newEventLog()
+  log.append(EventType.UserAction, 1, """{"a":1}""")
+  log.append(EventType.ApiResponse, 1, """{"b":2}""")
+  log.append(EventType.UserAction, 1, """{"c":3}""")
+  log.append(EventType.ProxyMinted, 1, """{"d":4}""")
+  let delta = log.eventsSince(2)
+  doAssert delta.len == 2, "Should return events after sequence 2, got " & $delta.len
+  doAssert delta[0].sequence == 3
+  doAssert delta[1].sequence == 4
+
+echo "test_eventlog: Task 9a passed."
+
+block testEventsSinceZero:
+  var log = newEventLog()
+  log.append(EventType.UserAction, 1, """{"a":1}""")
+  log.append(EventType.UserAction, 1, """{"b":2}""")
+  let delta = log.eventsSince(0)
+  doAssert delta.len == 2, "eventsSince(0) should return all events"
+
+echo "test_eventlog: Task 9b passed."
+
+block testEventsSinceAll:
+  var log = newEventLog()
+  log.append(EventType.UserAction, 1, """{"a":1}""")
+  let delta = log.eventsSince(1)
+  doAssert delta.len == 0, "eventsSince(lastSeq) should return empty"
+
+echo "test_eventlog: Task 9c passed."
+
+# --- Task 10: Chain continuity ---
+block testVerifyContinuity:
+  var log = newEventLog()
+  log.append(EventType.UserAction, 1, """{"a":1}""")
+  log.append(EventType.UserAction, 1, """{"b":2}""")
+  let delta = log.eventsSince(1)
+  doAssert delta.len == 1
+  let result = verifyContinuity(log[0], delta)
+  doAssert result.valid, "Delta should connect to anchor: " & result.error
+
+echo "test_eventlog: Task 10a passed."
+
+block testVerifyContinuityBroken:
+  var log1 = newEventLog()
+  log1.append(EventType.UserAction, 1, """{"a":1}""")
+  var log2 = newEventLog()
+  log2.append(EventType.UserAction, 1, """{"x":99}""")
+  let result = verifyContinuity(log1[0], log2.events)
+  doAssert not result.valid, "Delta from different chain should fail continuity"
+
+echo "test_eventlog: Task 10b passed."
+
+block testVerifyContinuityEmpty:
+  var log = newEventLog()
+  log.append(EventType.UserAction, 1, """{"a":1}""")
+  let result = verifyContinuity(log[0], @[])
+  doAssert result.valid, "Empty delta should be valid"
+
+echo "test_eventlog: Task 10c passed."
+
 echo "All eventlog tests passed."
