@@ -1,0 +1,33 @@
+# Nim
+nimcache/
+*.exe
+*.out
+*.app
+
+# Generated artifacts
+_generated/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Node (for wrangler/tooling)
+node_modules/
+.wrangler/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
