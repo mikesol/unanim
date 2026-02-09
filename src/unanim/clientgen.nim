@@ -26,6 +26,15 @@ proc stripSecrets*(n: NimNode): NimNode =
   for i in 0..<n.len:
     result.add(stripSecrets(n[i]))
 
+proc collectSecretNamesFromNode*(n: NimNode, names: var seq[string]) =
+  ## Recursively collect all secret names from secret("name") calls in a tree.
+  if isSecretCall(n):
+    if n.len > 1 and n[1].kind == nnkStrLit:
+      names.add(n[1].strVal)
+    return  # don't recurse into the secret call itself
+  for i in 0..<n.len:
+    collectSecretNamesFromNode(n[i], names)
+
 proc generateHtmlShell*(scriptFile: string, title: string = "App"): string =
   ## Generate a minimal standalone HTML shell that loads the compiled JS.
   ## SCAFFOLD(Phase 1, #5): This is a minimal scaffold. Will be replaced

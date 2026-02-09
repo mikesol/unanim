@@ -76,3 +76,41 @@ block testStripSecretsDeepNested:
     doAssert stripped[2].strVal == ""
 
 echo "test_clientgen: Task 2 passed."
+
+block testCollectSecretNamesFromArgs:
+  static:
+    let ast = newNimNode(nnkInfix).add(
+      ident("&"),
+      newStrLitNode("Bearer "),
+      newCall(ident("secret"), newStrLitNode("openai-key"))
+    )
+    var names: seq[string] = @[]
+    collectSecretNamesFromNode(ast, names)
+    doAssert names == @["openai-key"],
+      "Should collect 'openai-key', got " & $names
+
+block testCollectMultipleSecretNames:
+  static:
+    let ast = newStmtList(
+      newCall(ident("secret"), newStrLitNode("k1")),
+      newCall(ident("secret"), newStrLitNode("k2")),
+      newStrLitNode("no-secret-here")
+    )
+    var names: seq[string] = @[]
+    collectSecretNamesFromNode(ast, names)
+    doAssert names.len == 2
+    doAssert "k1" in names
+    doAssert "k2" in names
+
+block testCollectNoSecrets:
+  static:
+    let ast = newNimNode(nnkInfix).add(
+      ident("&"),
+      newStrLitNode("Hello"),
+      newStrLitNode("World")
+    )
+    var names: seq[string] = @[]
+    collectSecretNamesFromNode(ast, names)
+    doAssert names.len == 0, "No secret names expected, got " & $names
+
+echo "test_clientgen: Task 3 passed."
