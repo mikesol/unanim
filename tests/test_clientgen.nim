@@ -186,3 +186,35 @@ block testProxyRequiredReprDoesNotContainSecretMarker:
     "Rewritten code should NOT contain secret() calls, got: " & code
 
 echo "test_clientgen: Task 5 passed."
+
+block testScanForSecretsFindsPlaceholders:
+  let jsCode = """
+    var x = "<<SECRET:openai-key>>";
+    fetch("https://api.com", {"Authorization": "Bearer <<SECRET:fal-key>>"});
+  """
+  let found = scanForSecrets(jsCode, @["openai-key", "fal-key"])
+  doAssert found.len == 2, "Should find 2 leaked secrets, got " & $found.len
+  doAssert "openai-key" in found
+  doAssert "fal-key" in found
+
+block testScanForSecretsCleanOutput:
+  let jsCode = """
+    var x = fetch("https://worker.com/proxy?target=api.com",
+      {"X-Unanim-Secrets": "openai-key"});
+  """
+  # The secret NAME in metadata header is ok -- it's not the VALUE
+  # scanForSecrets checks for <<SECRET:...>> placeholder pattern
+  let found = scanForSecrets(jsCode, @["openai-key"])
+  doAssert found.len == 0,
+    "Clean output should have no leaked secrets, got " & $found
+
+block testScanForSecretsPartialMatch:
+  let jsCode = """
+    var apiKey = "sk-proj-abc123";
+    var token = "<<SECRET:my-token>>";
+  """
+  let found = scanForSecrets(jsCode, @["my-token", "other-token"])
+  doAssert found.len == 1, "Should find 1 leaked secret, got " & $found.len
+  doAssert "my-token" in found
+
+echo "test_clientgen: Task 6 passed."

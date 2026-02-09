@@ -214,6 +214,20 @@ macro rewriteProxyFetch*(workerUrl: static[string], body: untyped): untyped =
   ## with secrets stripped and secret names sent as metadata.
   result = rewriteNode(body, workerUrl)
 
+proc scanForSecrets*(jsOutput: string, secretNames: seq[string]): seq[string] =
+  ## Scan generated JS output for leaked secrets.
+  ## Checks for:
+  ## 1. <<SECRET:name>> placeholder patterns (should never appear in output)
+  ##
+  ## Returns a list of secret names found in the output.
+  ## An empty list means the output is clean.
+  result = @[]
+  for name in secretNames:
+    let placeholder = "<<SECRET:" & name & ">>"
+    if placeholder in jsOutput:
+      if name notin result:
+        result.add(name)
+
 proc generateHtmlShell*(scriptFile: string, title: string = "App"): string =
   ## Generate a minimal standalone HTML shell that loads the compiled JS.
   ## SCAFFOLD(Phase 1, #5): This is a minimal scaffold. Will be replaced
