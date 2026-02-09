@@ -26,120 +26,156 @@ proc sanitizeEnvVar*(name: string): string =
   ## Convert a secret name like "openai-key" to an env var like "OPENAI_KEY"
   result = name.toUpperAscii().replace("-", "_").replace(".", "_")
 
-proc generateWorkerJs*(secrets: seq[string], routes: seq[RouteInfo]): string =
+proc generateWorkerJs*(secrets: seq[string], routes: seq[RouteInfo],
+                       hasDO: bool = false): string =
   ## Generate a standalone Cloudflare Worker JS file (ES modules format).
   ## The Worker:
   ## - Accepts POST requests with JSON body containing target URL and headers
   ## - Reads secrets from env, replaces <<SECRET:name>> placeholders
   ## - Forwards the request to the target URL
   ## - Returns the response
+  ## When hasDO is true, also routes /do/* requests to Durable Objects.
   ##
   ## SCAFFOLD(phase1, #4): This is a simplified v1 stateless router.
   ## Phase 2 adds DOs, Phase 3 adds sync, Phase 4 adds auth/webhooks/cron.
 
-  result = """// Unanim Generated Cloudflare Worker
-// SCAFFOLD(phase1, #4): Stateless router with credential injection.
-// This Worker is standalone — copy to a fresh Cloudflare project and it works.
+  # CORS configuration varies based on DO support
+  let corsMethods = if hasDO: "GET, POST, OPTIONS" else: "POST, OPTIONS"
+  let corsHeaders = if hasDO: "Content-Type, X-User-Id" else: "Content-Type"
 
-export default {
-  async fetch(request, env, ctx) {
-    // Handle CORS preflight
-    if (request.method === "OPTIONS") {
-      return new Response(null, {
-        status: 204,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
-        },
-      });
-    }
+  # Section 1: Header and fetch handler opening
+  result = "// Unanim Generated Cloudflare Worker\n"
+  result &= "// SCAFFOLD(phase1, #4): Stateless router with credential injection.\n"
+  result &= "// This Worker is standalone — copy to a fresh Cloudflare project and it works.\n"
+  result &= "\n"
+  result &= "export default {\n"
+  result &= "  async fetch(request, env, ctx) {\n"
 
-    // Only accept POST requests
-    if (request.method !== "POST") {
-      return new Response(JSON.stringify({ error: "Method not allowed. Use POST." }), {
-        status: 405,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-      });
-    }
+  # Section 2: CORS preflight handler
+  result &= "    // Handle CORS preflight\n"
+  result &= "    if (request.method === \"OPTIONS\") {\n"
+  result &= "      return new Response(null, {\n"
+  result &= "        status: 204,\n"
+  result &= "        headers: {\n"
+  result &= "          \"Access-Control-Allow-Origin\": \"*\",\n"
+  result &= "          \"Access-Control-Allow-Methods\": \"" & corsMethods & "\",\n"
+  result &= "          \"Access-Control-Allow-Headers\": \"" & corsHeaders & "\",\n"
+  result &= "        },\n"
+  result &= "      });\n"
+  result &= "    }\n"
 
-    let body;
-    try {
-      body = await request.json();
-    } catch (e) {
-      return new Response(JSON.stringify({ error: "Invalid JSON body." }), {
-        status: 400,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-      });
-    }
+  # Section 3: DO routing (only when hasDO is true)
+  if hasDO:
+    result &= "\n"
+    result &= "    // Route /do/* requests to Durable Objects\n"
+    result &= "    const reqUrl = new URL(request.url);\n"
+    result &= "    if (reqUrl.pathname.startsWith(\"/do/\")) {\n"
+    result &= "      const userId = request.headers.get(\"X-User-Id\") || reqUrl.searchParams.get(\"user_id\");\n"
+    result &= "      if (!userId) {\n"
+    result &= "        return new Response(JSON.stringify({ error: \"Missing user ID. Provide X-User-Id header or user_id query param.\" }), {\n"
+    result &= "          status: 400,\n"
+    result &= "          headers: { \"Content-Type\": \"application/json\", \"Access-Control-Allow-Origin\": \"*\" },\n"
+    result &= "        });\n"
+    result &= "      }\n"
+    result &= "      const doId = env.USER_DO.idFromName(userId);\n"
+    result &= "      const doStub = env.USER_DO.get(doId);\n"
+    result &= "      const doPath = reqUrl.pathname.replace(/^\\/do/, \"\");\n"
+    result &= "      const doUrl = new URL(doPath + reqUrl.search, request.url);\n"
+    result &= "      return doStub.fetch(new Request(doUrl, request));\n"
+    result &= "    }\n"
 
-    const { url, headers, method, requestBody } = body;
+  # Section 4: POST-only check and proxy logic
+  result &= "\n"
+  result &= "    // Only accept POST requests\n"
+  result &= "    if (request.method !== \"POST\") {\n"
+  result &= "      return new Response(JSON.stringify({ error: \"Method not allowed. Use POST.\" }), {\n"
+  result &= "        status: 405,\n"
+  result &= "        headers: { \"Content-Type\": \"application/json\", \"Access-Control-Allow-Origin\": \"*\" },\n"
+  result &= "      });\n"
+  result &= "    }\n"
+  result &= "\n"
+  result &= "    let body;\n"
+  result &= "    try {\n"
+  result &= "      body = await request.json();\n"
+  result &= "    } catch (e) {\n"
+  result &= "      return new Response(JSON.stringify({ error: \"Invalid JSON body.\" }), {\n"
+  result &= "        status: 400,\n"
+  result &= "        headers: { \"Content-Type\": \"application/json\", \"Access-Control-Allow-Origin\": \"*\" },\n"
+  result &= "      });\n"
+  result &= "    }\n"
+  result &= "\n"
+  result &= "    const { url, headers, method, requestBody } = body;\n"
+  result &= "\n"
+  result &= "    if (!url) {\n"
+  result &= "      return new Response(JSON.stringify({ error: \"Missing 'url' in request body.\" }), {\n"
+  result &= "        status: 400,\n"
+  result &= "        headers: { \"Content-Type\": \"application/json\", \"Access-Control-Allow-Origin\": \"*\" },\n"
+  result &= "      });\n"
+  result &= "    }\n"
+  result &= "\n"
 
-    if (!url) {
-      return new Response(JSON.stringify({ error: "Missing 'url' in request body." }), {
-        status: 400,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-      });
-    }
+  # Section 5: Secret injection function
+  result &= "    // Inject secrets: replace <<SECRET:name>> placeholders with env values\n"
+  result &= "    function injectSecrets(value) {\n"
+  result &= "      if (typeof value !== \"string\") return value;\n"
+  result &= "      return value.replace(/<<SECRET:([^>]+)>>/g, (match, secretName) => {\n"
+  result &= "        const envKey = secretName.toUpperCase().replace(/-/g, \"_\").replace(/\\./g, \"_\");\n"
+  result &= "        const secretValue = env[envKey];\n"
+  result &= "        if (secretValue === undefined) {\n"
+  result &= "          throw new Error(`Secret \"${secretName}\" (env: ${envKey}) is not configured.`);\n"
+  result &= "        }\n"
+  result &= "        return secretValue;\n"
+  result &= "      });\n"
+  result &= "    }\n"
+  result &= "\n"
 
-    // Inject secrets: replace <<SECRET:name>> placeholders with env values
-    function injectSecrets(value) {
-      if (typeof value !== "string") return value;
-      return value.replace(/<<SECRET:([^>]+)>>/g, (match, secretName) => {
-        const envKey = secretName.toUpperCase().replace(/-/g, "_").replace(/\./g, "_");
-        const secretValue = env[envKey];
-        if (secretValue === undefined) {
-          throw new Error(`Secret "${secretName}" (env: ${envKey}) is not configured.`);
-        }
-        return secretValue;
-      });
-    }
+  # Section 6: Secret resolution into headers, URL, body
+  result &= "    // Inject secrets into headers\n"
+  result &= "    const resolvedHeaders = {};\n"
+  result &= "    if (headers && typeof headers === \"object\") {\n"
+  result &= "      for (const [key, value] of Object.entries(headers)) {\n"
+  result &= "        resolvedHeaders[key] = injectSecrets(value);\n"
+  result &= "      }\n"
+  result &= "    }\n"
+  result &= "\n"
+  result &= "    // Inject secrets into URL (in case secret is embedded in URL)\n"
+  result &= "    const resolvedUrl = injectSecrets(url);\n"
+  result &= "\n"
+  result &= "    // Inject secrets into request body if it's a string\n"
+  result &= "    let resolvedBody = requestBody;\n"
+  result &= "    if (typeof resolvedBody === \"string\") {\n"
+  result &= "      resolvedBody = injectSecrets(resolvedBody);\n"
+  result &= "    } else if (resolvedBody !== undefined && resolvedBody !== null) {\n"
+  result &= "      resolvedBody = JSON.stringify(resolvedBody);\n"
+  result &= "    }\n"
+  result &= "\n"
 
-    // Inject secrets into headers
-    const resolvedHeaders = {};
-    if (headers && typeof headers === "object") {
-      for (const [key, value] of Object.entries(headers)) {
-        resolvedHeaders[key] = injectSecrets(value);
-      }
-    }
-
-    // Inject secrets into URL (in case secret is embedded in URL)
-    const resolvedUrl = injectSecrets(url);
-
-    // Inject secrets into request body if it's a string
-    let resolvedBody = requestBody;
-    if (typeof resolvedBody === "string") {
-      resolvedBody = injectSecrets(resolvedBody);
-    } else if (resolvedBody !== undefined && resolvedBody !== null) {
-      resolvedBody = JSON.stringify(resolvedBody);
-    }
-
-    // Forward the request
-    try {
-      const response = await fetch(resolvedUrl, {
-        method: method || "POST",
-        headers: resolvedHeaders,
-        body: resolvedBody,
-      });
-
-      const responseBody = await response.text();
-
-      return new Response(responseBody, {
-        status: response.status,
-        headers: {
-          "Content-Type": response.headers.get("Content-Type") || "application/octet-stream",
-          "Access-Control-Allow-Origin": "*",
-        },
-      });
-    } catch (e) {
-      return new Response(JSON.stringify({ error: "Upstream request failed: " + e.message }), {
-        status: 502,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-      });
-    }
-  },
-};
-"""
+  # Section 7: Forward request and return response
+  result &= "    // Forward the request\n"
+  result &= "    try {\n"
+  result &= "      const response = await fetch(resolvedUrl, {\n"
+  result &= "        method: method || \"POST\",\n"
+  result &= "        headers: resolvedHeaders,\n"
+  result &= "        body: resolvedBody,\n"
+  result &= "      });\n"
+  result &= "\n"
+  result &= "      const responseBody = await response.text();\n"
+  result &= "\n"
+  result &= "      return new Response(responseBody, {\n"
+  result &= "        status: response.status,\n"
+  result &= "        headers: {\n"
+  result &= "          \"Content-Type\": response.headers.get(\"Content-Type\") || \"application/octet-stream\",\n"
+  result &= "          \"Access-Control-Allow-Origin\": \"*\",\n"
+  result &= "        },\n"
+  result &= "      });\n"
+  result &= "    } catch (e) {\n"
+  result &= "      return new Response(JSON.stringify({ error: \"Upstream request failed: \" + e.message }), {\n"
+  result &= "        status: 502,\n"
+  result &= "        headers: { \"Content-Type\": \"application/json\", \"Access-Control-Allow-Origin\": \"*\" },\n"
+  result &= "      });\n"
+  result &= "    }\n"
+  result &= "  },\n"
+  result &= "};\n"
 
 proc generateDurableObjectJs*(): string =
   ## Generate a Durable Object ES module class with SQLite event storage.

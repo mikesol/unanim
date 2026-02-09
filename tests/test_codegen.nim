@@ -292,4 +292,33 @@ block testWranglerTomlWithoutDO:
 
 echo "test_codegen: Task 17 passed."
 
+# --- Task 18: generateWorkerJs with DO routing ---
+block testWorkerJsWithDORouting:
+  let js = generateWorkerJs(@[], @[], hasDO = true)
+  doAssert "USER_DO" in js
+  doAssert "idFromName" in js
+  doAssert "X-User-Id" in js
+  doAssert "user_id" in js
+  doAssert "/do/" in js
+  doAssert "injectSecrets" in js
+
+echo "test_codegen: Task 18 passed."
+
+# --- Task 19: generateWorkerJs without DO (backwards compat) ---
+block testWorkerJsWithoutDO:
+  let js = generateWorkerJs(@[], @[])
+  doAssert "USER_DO" notin js
+  doAssert "idFromName" notin js
+  doAssert "export default" in js
+
+echo "test_codegen: Task 19 passed."
+
+# --- Task 20: Worker CORS updated for DO ---
+block testWorkerCorsWithDO:
+  let js = generateWorkerJs(@[], @[], hasDO = true)
+  doAssert "GET, POST, OPTIONS" in js
+  doAssert "X-User-Id" in js
+
+echo "test_codegen: Task 20 passed."
+
 echo "All codegen tests passed."
