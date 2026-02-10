@@ -390,4 +390,28 @@ block testDurableObjectVerification:
 
 echo "test_codegen: Task 25 passed."
 
+# --- Task 26: DO has /proxy endpoint ---
+block testDurableObjectProxyEndpoint:
+  let js = generateDurableObjectJs()
+  doAssert "handleProxy" in js,
+    "DO should have handleProxy method"
+  doAssert "events_since" in js,
+    "DO proxy should read events_since from request"
+  doAssert "events_accepted" in js,
+    "DO proxy response should include events_accepted"
+  doAssert "server_events" in js,
+    "DO proxy response should include server_events"
+  doAssert "verifyChain" in js,
+    "DO proxy should call verifyChain"
+
+echo "test_codegen: Task 26 passed."
+
+# --- Task 27: DO /proxy endpoint routes correctly ---
+block testDurableObjectProxyRouting:
+  let js = generateDurableObjectJs()
+  doAssert "\"/proxy\"" in js,
+    "DO fetch should route /proxy path"
+
+echo "test_codegen: Task 27 passed."
+
 echo "All codegen tests passed."

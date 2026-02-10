@@ -297,6 +297,8 @@ export class UserDO {
         return await this.getEvents(since, corsHeaders);
       } else if (path === "/status" && request.method === "GET") {
         return await this.getStatus(corsHeaders);
+      } else if (path === "/proxy" && request.method === "POST") {
+        return await this.handleProxy(request, corsHeaders);
       } else {
         return new Response(JSON.stringify({ error: "Not found" }), {
           status: 404,
@@ -357,6 +359,134 @@ export class UserDO {
       status: 200,
       headers: corsHeaders,
     });
+  }
+
+  injectSecrets(value) {
+    if (typeof value !== "string") return value;
+    return value.replace(/<<SECRET:([^>]+)>>/g, (match, secretName) => {
+      const envKey = secretName.toUpperCase().replace(/-/g, "_").replace(/\./g, "_");
+      const secretValue = this.env[envKey];
+      if (secretValue === undefined) {
+        throw new Error(`Secret "${secretName}" (env: ${envKey}) is not configured.`);
+      }
+      return secretValue;
+    });
+  }
+
+  async handleProxy(request, corsHeaders) {
+    const body = await request.json();
+    const { events_since, events, request: apiRequest } = body;
+
+    // Determine anchor hash
+    let anchorHash = "0".repeat(64);
+    if (events_since && events_since > 0) {
+      const anchorRows = this.sql.exec(
+        `SELECT state_hash_after FROM events WHERE sequence = ?`,
+        events_since
+      ).toArray();
+      if (anchorRows.length > 0) {
+        anchorHash = anchorRows[0].state_hash_after;
+      }
+    } else {
+      // Use last stored event's hash as anchor, or zeros if empty
+      const lastRows = this.sql.exec(
+        `SELECT state_hash_after FROM events ORDER BY sequence DESC LIMIT 1`
+      ).toArray();
+      if (lastRows.length > 0) {
+        anchorHash = lastRows[0].state_hash_after;
+      }
+    }
+
+    // Verify incoming events chain from anchor
+    if (events && events.length > 0) {
+      const verification = await this.verifyChain(events, anchorHash);
+      if (!verification.valid) {
+        // Fetch server events for the client to reconcile
+        const sinceSeq = events_since || 0;
+        const serverRows = this.sql.exec(
+          `SELECT sequence, timestamp, event_type, schema_version, payload, state_hash_after, parent_hash FROM events WHERE sequence > ? ORDER BY sequence ASC`,
+          sinceSeq
+        ).toArray();
+
+        return new Response(JSON.stringify({
+          events_accepted: false,
+          error: verification.error,
+          failed_at: verification.failedAt,
+          server_events: serverRows,
+          response: null,
+        }), {
+          status: 409,
+          headers: corsHeaders,
+        });
+      }
+
+      // Store verified events
+      for (const event of events) {
+        this.sql.exec(
+          `INSERT INTO events (sequence, timestamp, event_type, schema_version, payload, state_hash_after, parent_hash) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          event.sequence,
+          event.timestamp,
+          event.event_type,
+          event.schema_version,
+          event.payload,
+          event.state_hash_after,
+          event.parent_hash
+        );
+      }
+    }
+
+    // Inject secrets into the API request
+    let resolvedUrl = this.injectSecrets(apiRequest.url);
+    const resolvedHeaders = {};
+    if (apiRequest.headers && typeof apiRequest.headers === "object") {
+      for (const [key, value] of Object.entries(apiRequest.headers)) {
+        resolvedHeaders[key] = this.injectSecrets(value);
+      }
+    }
+    let resolvedBody = apiRequest.body;
+    if (typeof resolvedBody === "string") {
+      resolvedBody = this.injectSecrets(resolvedBody);
+    } else if (resolvedBody !== undefined && resolvedBody !== null) {
+      resolvedBody = JSON.stringify(resolvedBody);
+    }
+
+    // Forward API call
+    try {
+      const apiResponse = await fetch(resolvedUrl, {
+        method: apiRequest.method || "POST",
+        headers: resolvedHeaders,
+        body: resolvedBody,
+      });
+
+      const responseBody = await apiResponse.text();
+      const responseHeaders = {};
+      apiResponse.headers.forEach((value, key) => {
+        responseHeaders[key] = value;
+      });
+
+      return new Response(JSON.stringify({
+        events_accepted: true,
+        server_events: [],
+        response: {
+          status: apiResponse.status,
+          headers: responseHeaders,
+          body: responseBody,
+        },
+      }), {
+        status: 200,
+        headers: corsHeaders,
+      });
+    } catch (e) {
+      return new Response(JSON.stringify({
+        events_accepted: true,
+        server_events: [],
+        response: null,
+        error: "Upstream request failed: " + e.message,
+      }), {
+        status: 502,
+        headers: corsHeaders,
+      });
+    }
   }
 }
 """
