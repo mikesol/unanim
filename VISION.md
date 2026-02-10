@@ -5,6 +5,7 @@
 *Latin unanimus: "of one mind." One source of truth. The compiler decides the rest.*
 
 > **Changelog from 0.1.0:**
+> - Added performance budgets and comparative benchmarking (Section 8) per spec-change #23. Establishes measurable targets against industry leaders (Qwik, Astro, Next.js, vanilla Cloudflare Workers) and CI-enforced size budgets for generated artifacts. Phased rollout: warnings in Phase 3, failures in Phase 4, full comparative suite in Phase 5.
 > - Removed event hash chain (`state_hash_after`, `parent_hash`) per spec-change #21. Replaced with sequence-number continuity checking. The hash chain added complexity without preventing any concrete abuse that sequence numbers + server-side enforcement don't already cover. See #21 for full analysis.
 > - Moved state verification (Merkle tree, dual-execution replay) to optional debugging tool (Section 4.8)
 >
@@ -35,7 +36,7 @@ Today, building a web application means building two things: a frontend that the
 
 This project eliminates the backend as a thing you write. You write client code. All of it. Business logic, state management, UI, workflows -- everything is authored as if it runs in the browser. The compiler then examines your code and extracts the parts that *physically cannot* run on the client: secret references, stable-address handlers, and state sync logic. It generates the minimal server-side infrastructure to support those parts. You don't write server code. You don't deploy a backend. You don't think about the client/server boundary. The compiler thinks about it for you.
 
-**Speed is a first-class goal.** When everything runs on the client, reads are local and instantaneous -- no round-trip to a database server. Assets (generic and user-scoped) live close to the user via edge infrastructure. The system is edge-aware: it understands that data has geography, and it keeps state and assets near the client that owns them.
+**Speed is a first-class goal.** When everything runs on the client, reads are local and instantaneous -- no round-trip to a database server. Assets (generic and user-scoped) live close to the user via edge infrastructure. The system is edge-aware: it understands that data has geography, and it keeps state and assets near the client that owns them. This isn't aspirational — it's measured. The framework enforces performance budgets (Section 8) against industry leaders: generated artifacts must be smaller and faster than Qwik, Astro, and vanilla Cloudflare Workers, with CI catching regressions before they ship.
 
 **The primary author is an LLM.** The system is designed from the ground up so that a language model can generate a complete, working application from a natural language description. The DSL, the compiler errors, the documentation -- all optimized for LLM comprehension, not human ergonomics. A human can read and inspect everything, but the authoring workflow assumes the writer is a machine.
 
@@ -232,7 +233,7 @@ Not a primitive the developer invokes, but a compiler pass that runs on every `w
 
 The sync protocol is custom-built (not LiveStore, Zero, PowerSync, or any existing engine). No existing sync engine provides the specific combination our architecture requires: event-level sync piggybacked on API calls, lease-based single-writer with server event generation, and compile-time verified determinism.
 
-**Client:** IndexedDB stores the event log and materialized state. Zero bundle overhead, instant availability. The framework abstracts IndexedDB entirely -- developers write SQL-like queries, and the compiler validates them against migrations at compile time, rejecting illegal operations before runtime. The metaprogramming layer treats IndexedDB as if it were a SQL database (similar in spirit to [absurd-sql](https://github.com/jlongster/absurd-sql)). No WASM SQLite on the client -- the 1.5MB bundle + 500ms init is too steep for first page load, and anything we need from SQL semantics we can enforce at compile time.
+**Client:** IndexedDB stores the event log and materialized state. Zero bundle overhead, instant availability. The framework abstracts IndexedDB entirely -- developers write SQL-like queries, and the compiler validates them against migrations at compile time, rejecting illegal operations before runtime. The metaprogramming layer treats IndexedDB as if it were a SQL database (similar in spirit to [absurd-sql](https://github.com/jlongster/absurd-sql)). No WASM SQLite on the client -- the 1.5MB bundle + 500ms init is too steep for first page load, and anything we need from SQL semantics we can enforce at compile time. All generated client JS is subject to the performance budgets in Section 8 — the IndexedDB wrapper, sync glue, and HTML shell each have enforced size limits.
 
 **Implementation-time design required:** The mechanism for the IndexedDB-as-SQL abstraction needs to be worked out during the build. The compile-time side is clear: Nim macros parse SQL strings from `db.query()` and `migration()` calls, validate column names / types / table references against the declared schema, and reject invalid queries. The runtime side has multiple viable approaches: (a) compile SQL to IndexedDB operations (object store reads with index lookups, translating WHERE clauses to IDBKeyRange); (b) a lightweight in-memory query engine that loads from IndexedDB and evaluates SQL; (c) use absurd-sql or a similarly thin SQLite-over-IndexedDB layer if the bundle cost is acceptable as a lazy-loaded chunk rather than a blocking initial load. The choice depends on query complexity needed — if apps mostly do key lookups and simple filters, (a) suffices; if they need JOINs and aggregations, (b) or (c) may be necessary.
 
@@ -359,7 +360,7 @@ This is a development/debugging tool, not a runtime gate. The primary verificati
 
 ### 4.9 The WebSocket Channel
 
-The client maintains a hibernated WebSocket connection to its Durable Object (introduced for lease detection in Section 8.6). This connection exists regardless -- it's needed for presence. Since it's already there, it becomes a general-purpose channel between the user's DO and their client.
+The client maintains a hibernated WebSocket connection to its Durable Object (introduced for lease detection in Section 9.6). This connection exists regardless -- it's needed for presence. Since it's already there, it becomes a general-purpose channel between the user's DO and their client.
 
 **What the WebSocket gains us:**
 
@@ -819,9 +820,84 @@ For every feature: (1) What standard format does it map to? (2) Can the generate
 
 ---
 
-## 8. Hard Problems (Resolved)
+## 8. Performance Budgets
 
-### 8.1 -- The Sync Engine *(was Section 4.1)*
+Speed is the framework's primary value proposition. Without measurable targets and enforcement, architectural bloat creeps in and becomes deeply embedded. This section defines comparative benchmarks (beat the industry leaders) and absolute budgets (CI-enforced size limits) that keep the framework honest.
+
+### 8.1 Comparative Benchmarks
+
+The framework generates **vanilla JS with zero framework runtime**. This structural advantage means we should be below the best existing frameworks, which all ship some runtime overhead.
+
+**Reference frameworks and current state of the art:**
+
+| Framework | Category | Eager JS (gzipped) | Total JS | FCP (Fast 3G) |
+|---|---|---|---|---|
+| Qwik | Frontend (resumable) | 0-2 KiB | 38 KiB | ~0.7s |
+| Astro | Frontend (islands) | 0-15 KiB | 35 KiB | ~0.6s |
+| SolidJS | Frontend (reactive) | ~16 KiB | ~30 KiB | ~0.6s |
+| Next.js | Frontend (mainstream) | 91 KiB | 103-176 KiB | ~1.5s |
+| Vanilla CF Worker | Backend | — | — | ~5ms cold start |
+
+*Sources: [Builder.io framework-benchmarks](https://github.com/BuilderIO/framework-benchmarks), [Feature-Sliced Design benchmarks](https://feature-sliced.design/blog/js-framework-benchmarks), [Cloudflare Workers blog](https://blog.cloudflare.com/eliminating-cold-starts-with-cloudflare-workers/).*
+
+**Unanim must-beat targets:**
+
+| Metric | Target | Rationale |
+|---|---|---|
+| Initial eager JS | ≤ Qwik (0-2 KiB) | Zero framework runtime = zero eager JS for static, < 2 KiB for interactive |
+| Total JS transferred | < Astro (~35 KiB) | Target < 10 KiB gzipped framework overhead for a standard CRUD app |
+| First Contentful Paint | ≤ Astro on Fast 3G | < 1.0s static, < 1.5s interactive |
+| Worker cold start overhead | < 10ms above vanilla CF Worker | Generated Worker must not add meaningful overhead |
+| Proxy round-trip overhead | < 20ms above direct fetch | Client→Worker→origin→Worker→client vs. client→origin |
+
+These are **framework overhead** targets — app-specific logic is excluded. The aspiration is 10x improvement over mainstream frameworks (Next.js); the minimum bar is matching or beating best-in-class (Qwik, Astro).
+
+### 8.2 Absolute Budgets (CI-Enforced)
+
+| Generated Artifact | Max Size (gzipped) | Rationale |
+|---|---|---|
+| Worker JS (framework overhead) | 5 KiB | Proxy + CORS + DO routing |
+| IndexedDB wrapper | 3 KiB | Event storage + query API |
+| HTML shell (excluding app JS) | 2 KiB | Minimal document structure |
+| Per-route client JS (framework overhead) | 2 KiB | Event handlers + sync glue |
+
+These budgets are enforced in CI. If a PR causes a generated artifact to exceed its budget, the build warns (Phase 3) or fails (Phase 4+). Budgets are reviewed quarterly — they can decrease (tighter) but should never increase without a spec-change issue.
+
+### 8.3 Benchmark Suite
+
+A benchmark suite is a **cross-cutting concern** introduced in Phase 3, not deferred to Phase 5.
+
+**Reference apps:** 3-4 canonical apps implemented in Unanim AND in comparison frameworks:
+
+| App | Complexity | Exercises |
+|---|---|---|
+| Todo | Minimal | Bundle size floor, FCP, IndexedDB CRUD |
+| Blog | Content-heavy | Static generation, eager JS, asset loading |
+| CRUD Dashboard | Interactive | Sync protocol, proxy latency, state management |
+| Real-time Chat | Multi-user | WebSocket, shared state, DO throughput |
+
+Each reference app is built in Unanim, Next.js, Astro, and Qwik. Benchmarks run on every PR that touches `codegen` or `clientgen`.
+
+**Automated measurement:**
+- **Bundle size:** `gzip -c <artifact> | wc -c` in CI, compared against budgets
+- **Lighthouse CI:** FCP, LCP, TTI, Total Blocking Time on simulated Fast 3G
+- **Worker latency:** Custom timing harness measuring cold start, warm response, and proxy overhead
+- **Regression detection:** Any PR that increases a metric by > 10% is flagged for review
+
+### 8.4 Phased Rollout
+
+| Phase | Enforcement |
+|---|---|
+| Phase 2 (State) | No enforcement. Budgets are documented targets only. |
+| Phase 3 (Sync) | Size budgets as **CI warnings**. First reference app (todo). |
+| Phase 4 (Primitives) | Size budgets as **CI failures**. CRUD dashboard reference app. Lighthouse CI. |
+| Phase 5 (Battle Testing) | Full comparative benchmarks. All reference apps. Comparison dashboard in repo. |
+
+---
+
+## 9. Hard Problems (Resolved)
+
+### 9.1 -- The Sync Engine *(was Section 4.1)*
 
 **Resolution:** Custom event-log-based sync protocol. No existing sync engine provides our specific combination of requirements. The protocol is described in Section 4.
 
@@ -832,17 +908,17 @@ For every feature: (1) What standard format does it map to? (2) Can the generate
 - Optional state verification via dual-execution replay (inspired by GGPO SyncTestSession)
 - No CRDTs (distributed single-player, not multiplayer)
 
-### 8.2 -- Asset Storage *(was Section 4.2)*
+### 9.2 -- Asset Storage *(was Section 4.2)*
 
 **Resolution:** R2 for blob storage. Assets referenced by URL in events, not inline. The proxy stores webhook-delivered assets (images, files) in R2, keyed by event ID. Client fetches assets by URL. Garbage collection: when events referencing an asset are compacted away, the asset is eligible for cleanup.
 
 Asset streaming for large files (video, datasets) is a v2 concern.
 
-### 8.3 -- Schema Evolution *(was Section 4.3)*
+### 9.3 -- Schema Evolution *(was Section 4.3)*
 
 **Resolution:** Three-tier strategy described in Section 5. The compiler as schema registry. Upcasters are safe blocks (compile-time verified pure). LLMs author complex upcasters; simple ones are auto-generated.
 
-### 8.4 -- Shared / Multi-tenant State *(was Section 4.4)*
+### 9.4 -- Shared / Multi-tenant State *(was Section 4.4)*
 
 **Resolution:** The `shared()` primitive and org-level Durable Objects (Section 4.10). Multiple users connect to the same org DO via WebSocket. The DO is single-threaded, providing natural total ordering of events without CRDTs or distributed consensus.
 
@@ -855,9 +931,9 @@ Asset streaming for large files (video, datasets) is a v2 concern.
 
 **Key safety property:** Costly operations (proxyFetch) cannot happen offline, so the "spent money on stale context" scenario is limited to the brief WebSocket broadcast latency window -- and the DO catches it because all proxyFetch calls are verified against current state.
 
-See the OrgShoots worked example and stress tests in Sections 4.10 and 10.
+See the OrgShoots worked example and stress tests in Sections 4.10 and 11.
 
-### 8.5 -- Large State / ETL *(was Section 4.5)*
+### 9.5 -- Large State / ETL *(was Section 4.5)*
 
 **Resolution:** The lease model handles this naturally. During a long-running cron job (ETL), the server holds the write lease. It generates events incrementally, stored in the DO's SQLite. When the client reconnects, it receives the events as a batch. The client applies them to its local state incrementally (not all at once -- events stream in via the sync response).
 
@@ -865,7 +941,7 @@ See the OrgShoots worked example and stress tests in Sections 4.10 and 10.
 
 **Known footgun -- the ETL pull-down problem:** If a cron generates a large amount of data server-side (thousands of events, megabytes of state), the next client login must pull all of it down before the client has a usable local DB. This is a "know your framework" concern -- developers running heavy ETL via crons should be aware that the client's first sync after an ETL run will be proportional to the data generated. The framework should be smart about this: if the client connects and has no local DB (or a stale one), stream the current snapshot rather than replaying the entire event log. The snapshot-based approach (Section 4.7) means the client downloads the latest snapshot + events since, not the full history.
 
-### 8.6 -- Offline Detection *(was Section 4.6)*
+### 9.6 -- Offline Detection *(was Section 4.6)*
 
 **Resolution:** Three-layer lease mechanism using Cloudflare DO's built-in infrastructure. No custom heartbeat protocol.
 
@@ -884,13 +960,13 @@ See the OrgShoots worked example and stress tests in Sections 4.10 and 10.
 
 **Academic backing:** Gray & Cheriton 1989 ("Leases: An Efficient Fault-Tolerant Mechanism for Distributed File Cache Consistency") -- the foundational leases paper. Short leases (10-30s) capture most of the benefit. Our 120s timeout accounts for browser-to-edge latency variance. Fencing tokens (already in our design from LiteFS) prevent the stale-writer problem Kleppmann warns about.
 
-### 8.7 -- Progressive Migration *(was Section 4.7)*
+### 9.7 -- Progressive Migration *(was Section 4.7)*
 
 **Resolution:** Framework as compiler, not runtime (Section 7). Regenerable artifacts, incremental extraction, standard formats underneath. Inspired by Expo Prebuild (reversible, repeatable) and Supabase ("just Postgres").
 
 ---
 
-## 9. What's Explicitly Out of Scope
+## 10. What's Explicitly Out of Scope
 
 **Custom server-side logic.** The proxy does not execute arbitrary application code beyond portable handlers. If a developer needs a custom server endpoint that doesn't fit one of the primitives, that's a different tool.
 
@@ -904,7 +980,7 @@ See the OrgShoots worked example and stress tests in Sections 4.10 and 10.
 
 ---
 
-## 10. Testing Strategy
+## 11. Testing Strategy
 
 ### Dual-Execution Test Mode (from GGRS SyncTestSession)
 
@@ -954,7 +1030,7 @@ Bob has personal state (user preferences in his per-user DO) and shared state (s
 
 ---
 
-## 11. Resolved Design Decisions
+## 12. Resolved Design Decisions
 
 Decisions made during the 0.0.0 -> 0.1.0 research session:
 
@@ -964,15 +1040,15 @@ Decisions made during the 0.0.0 -> 0.1.0 research session:
 
 3. **Delegation threshold: 2+ I/O-bound operations.** If the compiler sees 2 or more sequential proxyFetch calls, it delegates the block to the server. There is no point doing a round-trip if you're going to beam back up again. Developers can also hint delegation explicitly.
 
-4. **Lease timeout: 120 seconds default.** Three-layer mechanism: proxyFetch renewal (primary), hibernated WebSocket auto-response (passive), DO Alarm (timeout trigger). Based on Gray-Cheriton 1989 analysis, adjusted for browser-to-edge variance. See Section 8.6.
+4. **Lease timeout: 120 seconds default.** Three-layer mechanism: proxyFetch renewal (primary), hibernated WebSocket auto-response (passive), DO Alarm (timeout trigger). Based on Gray-Cheriton 1989 analysis, adjusted for browser-to-edge variance. See Section 9.6.
 
 5. **Shared state conflicts are an application concern.** When two users simultaneously spend the last credit, the proxy mediates atomically via D1 transactions. The losing client gets a rejection. Handling that rejection is the developer's responsibility -- errors can happen anywhere, anytime, in any system.
 
-6. **Multi-user orgs via org-level DO, not CRDTs.** Multiple users connect to the same org DO. The DO is single-threaded, providing natural total ordering. The compiler classifies operations on `shared()` state as optimistic, barrier, or verified -- no developer annotation needed. Online multiplayer works; offline multiplayer doesn't (offline users' shared-state events are rejected on reconnect). This is an acceptable tradeoff because the apps this framework targets require network connectivity for their core value (AI APIs, asset storage). See Section 4.10 and the OrgShoots stress tests in Section 10.
+6. **Multi-user orgs via org-level DO, not CRDTs.** Multiple users connect to the same org DO. The DO is single-threaded, providing natural total ordering. The compiler classifies operations on `shared()` state as optimistic, barrier, or verified -- no developer annotation needed. Online multiplayer works; offline multiplayer doesn't (offline users' shared-state events are rejected on reconnect). This is an acceptable tradeoff because the apps this framework targets require network connectivity for their core value (AI APIs, asset storage). See Section 4.10 and the OrgShoots stress tests in Section 11.
 
 7. **Client storage eviction is the user's problem.** If Safari purges their data or they switch browsers, they re-download the DB from the server. The framework should be smart about this: detect stale/missing local state and stream the latest snapshot rather than replaying the full event log. But we don't design around Safari's 7-day eviction with special workarounds -- we design robust server-side persistence and fast re-sync.
 
-## 12. Known Footguns
+## 13. Known Footguns
 
 Things developers should be aware of when building on this framework:
 
@@ -988,7 +1064,7 @@ Things developers should be aware of when building on this framework:
 
 ---
 
-## 13. Build Philosophy
+## 14. Build Philosophy
 
 This section is for the LLM (or human) executing the build. It describes how the implementation should proceed, not what it should produce.
 
@@ -1014,7 +1090,7 @@ This is not "build the whole framework, then test." This is "build one thing, va
 
 TDD for correctness: write the test, write the implementation, verify. Standard practice.
 
-But also: **performance validation from day one.** If proxyFetch adds meaningful latency, we need to know before we build 10 more primitives on top of it. If IndexedDB queries are too slow for reactive UI, we need to know before we build the entire client abstraction layer.
+But also: **performance validation from day one.** If proxyFetch adds meaningful latency, we need to know before we build 10 more primitives on top of it. If IndexedDB queries are too slow for reactive UI, we need to know before we build the entire client abstraction layer. Section 8 defines concrete budgets — the build should validate against them continuously, not as a final check.
 
 And also: **real-world plausibility checks.** Deploy a tiny test app to Cloudflare. Open it in a browser. Use Chrome DevTools to inspect the network, the IndexedDB state, the WebSocket messages. Does it feel right? Would a developer trust this? Does the sync actually work when you put the browser in airplane mode and come back?
 
@@ -1036,6 +1112,7 @@ Phase 3: Sync
   - Lease mechanism (three-layer)
   - Offline → reconnect → merge
   - Validate: airplane mode test, lease timeout test
+  - Performance: size budgets as CI warnings, first reference app (todo)
 
 Phase 4: Primitives
   - guard() + proxy-minted events
@@ -1043,12 +1120,15 @@ Phase 4: Primitives
   - shared() + org DO + barrier broadcast
   - auth()
   - Validate: OrgShoots stress tests
+  - Performance: size budgets as CI failures, CRUD dashboard reference app, Lighthouse CI
 
-Phase 5: Polish
+Phase 5: Battle Testing
+  - Port real apps, discover gaps
+  - Full comparative benchmarks against Next.js, Astro, Qwik, vanilla CF Workers
+  - All reference apps, comparison dashboard in repo
   - Compiler errors (LLM-friendly)
   - Migration/ejection artifacts
   - Documentation, README, getting-started
-  - Performance benchmarks
 ```
 
 Each phase produces a working, deployable artifact. No phase depends on "we'll integrate it later." If Phase 2 reveals that our IndexedDB approach doesn't work, we find out before Phase 3 builds on it.
