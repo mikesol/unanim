@@ -377,6 +377,8 @@ block testDurableObjectHashing:
     "DO should have canonicalForm function"
   doAssert "hashEvent" in js,
     "DO should have hashEvent function"
+  doAssert "computeStateHash" in js,
+    "DO should have computeStateHash function (zeros state_hash_after before hashing)"
 
 echo "test_codegen: Task 24 passed."
 

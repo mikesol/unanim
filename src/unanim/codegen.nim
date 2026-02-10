@@ -234,9 +234,13 @@ export class UserDO {
   }
 
   async hashEvent(event) {
-    const forHashing = { ...event, state_hash_after: "" };
-    const canonical = this.canonicalForm(forHashing);
+    const canonical = this.canonicalForm(event);
     return await this.sha256Hex(canonical);
+  }
+
+  async computeStateHash(event) {
+    const forHashing = { ...event, state_hash_after: "" };
+    return await this.hashEvent(forHashing);
   }
 
   async verifyChain(events, anchorHash) {
@@ -253,16 +257,16 @@ export class UserDO {
         };
       }
 
-      const computedHash = await this.hashEvent(event);
-      if (event.state_hash_after !== computedHash) {
+      const computedStateHash = await this.computeStateHash(event);
+      if (event.state_hash_after !== computedStateHash) {
         return {
           valid: false,
           failedAt: i,
-          error: `Event ${event.sequence}: state_hash_after mismatch. Expected ${computedHash.slice(0, 16)}..., got ${event.state_hash_after.slice(0, 16)}...`,
+          error: `Event ${event.sequence}: state_hash_after mismatch. Expected ${computedStateHash.slice(0, 16)}..., got ${event.state_hash_after.slice(0, 16)}...`,
         };
       }
 
-      expectedParentHash = event.state_hash_after;
+      expectedParentHash = await this.hashEvent(event);
     }
 
     return { valid: true };
@@ -377,23 +381,26 @@ export class UserDO {
     const body = await request.json();
     const { events_since, events, request: apiRequest } = body;
 
-    // Determine anchor hash
+    // Determine anchor hash: hashEvent(last_stored_event) or zeros for genesis.
+    // parentHash of the next event = hashEvent(previous) which hashes the full
+    // canonical form (including populated state_hash_after), so the anchor must
+    // be computed the same way — not just state_hash_after.
     let anchorHash = "0".repeat(64);
     if (events_since && events_since > 0) {
       const anchorRows = this.sql.exec(
-        `SELECT state_hash_after FROM events WHERE sequence = ?`,
+        `SELECT sequence, timestamp, event_type, schema_version, payload, state_hash_after, parent_hash FROM events WHERE sequence = ?`,
         events_since
       ).toArray();
       if (anchorRows.length > 0) {
-        anchorHash = anchorRows[0].state_hash_after;
+        anchorHash = await this.hashEvent(anchorRows[0]);
       }
     } else {
       // Use last stored event's hash as anchor, or zeros if empty
       const lastRows = this.sql.exec(
-        `SELECT state_hash_after FROM events ORDER BY sequence DESC LIMIT 1`
+        `SELECT sequence, timestamp, event_type, schema_version, payload, state_hash_after, parent_hash FROM events ORDER BY sequence DESC LIMIT 1`
       ).toArray();
       if (lastRows.length > 0) {
-        anchorHash = lastRows[0].state_hash_after;
+        anchorHash = await this.hashEvent(lastRows[0]);
       }
     }
 
