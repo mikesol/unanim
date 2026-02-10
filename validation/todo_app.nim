@@ -244,3 +244,47 @@ echo ""
 echo "Todo app page generated at: " & testOutputDir & "/index.html"
 echo "Open in browser to exercise the full sync protocol."
 
+# --- Part 4: Size budget measurement ---
+
+import std/osproc
+import std/strutils
+
+echo ""
+echo "=== Artifact Size Budgets (VISION.md Section 8.2) ==="
+echo ""
+
+proc measureGzipped(filePath: string, label: string, budgetBytes: int) =
+  let (output, exitCode) = execCmdEx("gzip -c " & filePath & " | wc -c")
+  if exitCode == 0:
+    let sizeBytes = output.strip().parseInt()
+    let sizeKiB = sizeBytes.float / 1024.0
+    let budgetKiB = budgetBytes.float / 1024.0
+    let status = if sizeBytes <= budgetBytes: "OK" else: "OVER BUDGET"
+    echo label & ": " & $sizeBytes & " bytes (" &
+      sizeKiB.formatFloat(ffDecimal, 1) & " KiB) / " &
+      budgetKiB.formatFloat(ffDecimal, 0) & " KiB budget — " & status
+  else:
+    echo label & ": could not measure (" & output.strip() & ")"
+
+# Worker JS (framework overhead) — budget 5 KiB
+measureGzipped(deployDir & "/worker.js", "Worker JS", 5 * 1024)
+
+# Write individual artifacts for separate measurement
+let indexedDBJs = generateIndexedDBJs()
+let syncJs = generateSyncJs()
+let testDir = "validation/todo_app_test"
+writeFile(testDir & "/indexeddb.js", indexedDBJs)
+writeFile(testDir & "/sync.js", syncJs)
+
+# IndexedDB wrapper — budget 3 KiB
+measureGzipped(testDir & "/indexeddb.js", "IndexedDB wrapper", 3 * 1024)
+
+# Sync layer — budget 2 KiB
+measureGzipped(testDir & "/sync.js", "Sync layer", 2 * 1024)
+
+# HTML shell (just the shell, not app JS) — budget 2 KiB
+let shellHtml = generateHtmlShell("app.js", includeIndexedDB = true, includeSync = true)
+writeFile(testDir & "/shell.html", shellHtml)
+measureGzipped(testDir & "/shell.html", "HTML shell (with framework)", 2 * 1024)
+
+echo ""
