@@ -315,3 +315,71 @@ block testGenerateSyncJsBasic:
     "Sync JS should have sync function"
 
 echo "test_clientgen: Task 11 passed."
+
+# --- Task 12: Sync JS content details ---
+block testSyncJsDependsOnUnanimDB:
+  let js = generateSyncJs()
+  doAssert "unanimDB" in js,
+    "Sync JS should reference unanimDB (dependency)"
+  doAssert "unanimDB.getEventsSince" in js,
+    "Sync JS should call unanimDB.getEventsSince"
+  doAssert "unanimDB.appendEvents" in js,
+    "Sync JS should call unanimDB.appendEvents for server_events"
+  doAssert "unanimDB.getLatestEvent" in js,
+    "Sync JS should call unanimDB.getLatestEvent"
+
+echo "test_clientgen: Task 12a passed."
+
+block testSyncJsEndpoints:
+  let js = generateSyncJs()
+  doAssert "/do/proxy" in js,
+    "Sync JS should target /do/proxy endpoint"
+  doAssert "/do/sync" in js,
+    "Sync JS should target /do/sync endpoint"
+
+echo "test_clientgen: Task 12b passed."
+
+block testSyncJsHandles409:
+  let js = generateSyncJs()
+  doAssert "409" in js,
+    "Sync JS should handle 409 status"
+  doAssert "events_accepted" in js,
+    "Sync JS should check events_accepted field"
+  doAssert "server_events" in js,
+    "Sync JS should handle server_events in response"
+
+echo "test_clientgen: Task 12c passed."
+
+block testSyncJsOfflineHandling:
+  let js = generateSyncJs()
+  doAssert "offline" in js,
+    "Sync JS should handle offline state"
+  doAssert "queued" in js,
+    "Sync JS should indicate queued state on network error"
+
+echo "test_clientgen: Task 12d passed."
+
+block testSyncJsSyncMeta:
+  let js = generateSyncJs()
+  doAssert "last_synced_sequence" in js,
+    "Sync JS should track last synced sequence"
+  doAssert "unanim_sync_meta" in js,
+    "Sync JS should use a separate DB for sync metadata"
+
+echo "test_clientgen: Task 12e passed."
+
+block testSyncJsStandalone:
+  let js = generateSyncJs()
+  doAssert "import " notin js,
+    "Sync JS must be standalone — no imports"
+  doAssert "require(" notin js,
+    "Sync JS must be standalone — no requires"
+
+echo "test_clientgen: Task 12f passed."
+
+block testSyncJsUserId:
+  let js = generateSyncJs()
+  doAssert "X-User-Id" in js,
+    "Sync JS should send X-User-Id header for DO routing"
+
+echo "test_clientgen: Task 12g passed."
