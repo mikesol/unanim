@@ -414,4 +414,14 @@ block testDurableObjectProxyRouting:
 
 echo "test_codegen: Task 27 passed."
 
+# --- Task 28: Worker routes /do/proxy to DO ---
+block testWorkerRoutesProxy:
+  let js = generateWorkerJs(@[], @[], hasDO = true)
+  doAssert "/do/" in js,
+    "Worker should route /do/* paths"
+  doAssert "pathname" in js,
+    "Worker should parse pathname for routing"
+
+echo "test_codegen: Task 28 passed."
+
 echo "All codegen tests passed."
