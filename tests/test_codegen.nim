@@ -233,10 +233,11 @@ block testDurableObjectSqliteTable:
     "Events table should have schema_version column"
   doAssert "payload TEXT" in js,
     "Events table should have payload column"
-  doAssert "state_hash_after TEXT" in js,
-    "Events table should have state_hash_after column"
-  doAssert "parent_hash TEXT" in js,
-    "Events table should have parent_hash column"
+  # Spec-change #21: removed state_hash_after and parent_hash columns
+  doAssert "state_hash_after" notin js,
+    "Events table should NOT have state_hash_after column (spec-change #21)"
+  doAssert "parent_hash" notin js,
+    "Events table should NOT have parent_hash column (spec-change #21)"
 
 echo "test_codegen: Task 13 passed."
 
@@ -367,5 +368,64 @@ block testCombinedEjectability:
     "Combined worker.js must have named DO export"
 
 echo "test_codegen: Task 23 passed."
+
+# --- Task 24: DO has NO hash functions (spec-change #21) ---
+block testDurableObjectNoHashing:
+  let js = generateDurableObjectJs()
+  doAssert "crypto.subtle.digest" notin js,
+    "DO should NOT use Web Crypto API for SHA-256 (spec-change #21)"
+  doAssert "canonicalForm" notin js,
+    "DO should NOT have canonicalForm function (spec-change #21)"
+  doAssert "hashEvent" notin js,
+    "DO should NOT have hashEvent function (spec-change #21)"
+  doAssert "computeStateHash" notin js,
+    "DO should NOT have computeStateHash function (spec-change #21)"
+
+echo "test_codegen: Task 24 passed."
+
+# --- Task 25: DO has sequence continuity verification (not hash chain) ---
+block testDurableObjectSequenceVerification:
+  let js = generateDurableObjectJs()
+  doAssert "parent_hash" notin js,
+    "DO should NOT check parent_hash (spec-change #21)"
+  doAssert "state_hash_after" notin js,
+    "DO should NOT check state_hash_after (spec-change #21)"
+
+echo "test_codegen: Task 25 passed."
+
+# --- Task 26: DO has /proxy endpoint ---
+block testDurableObjectProxyEndpoint:
+  let js = generateDurableObjectJs()
+  doAssert "handleProxy" in js,
+    "DO should have handleProxy method"
+  doAssert "events_since" in js,
+    "DO proxy should read events_since from request"
+  doAssert "events_accepted" in js,
+    "DO proxy response should include events_accepted"
+  doAssert "server_events" in js,
+    "DO proxy response should include server_events"
+  # Spec-change #21: proxy uses inline sequence checking, not verifyChain
+  doAssert "sequence" in js,
+    "DO proxy should check sequence continuity"
+
+echo "test_codegen: Task 26 passed."
+
+# --- Task 27: DO /proxy endpoint routes correctly ---
+block testDurableObjectProxyRouting:
+  let js = generateDurableObjectJs()
+  doAssert "\"/proxy\"" in js,
+    "DO fetch should route /proxy path"
+
+echo "test_codegen: Task 27 passed."
+
+# --- Task 28: Worker routes /do/proxy to DO ---
+block testWorkerRoutesProxy:
+  let js = generateWorkerJs(@[], @[], hasDO = true)
+  doAssert "/do/" in js,
+    "Worker should route /do/* paths"
+  doAssert "pathname" in js,
+    "Worker should parse pathname for routing"
+
+echo "test_codegen: Task 28 passed."
 
 echo "All codegen tests passed."

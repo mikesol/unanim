@@ -4,6 +4,10 @@
 
 *Latin unanimus: "of one mind." One source of truth. The compiler decides the rest.*
 
+> **Changelog from 0.1.0:**
+> - Removed event hash chain (`state_hash_after`, `parent_hash`) per spec-change #21. Replaced with sequence-number continuity checking. The hash chain added complexity without preventing any concrete abuse that sequence numbers + server-side enforcement don't already cover. See #21 for full analysis.
+> - Moved state verification (Merkle tree, dual-execution replay) to optional debugging tool (Section 4.8)
+>
 > **Changelog from 0.0.0:**
 > - Resolved all Hard Problems from Section 4 with specific architectural decisions
 > - Added compile-time delegation (Nim metaprogramming determines client vs. server execution)
@@ -51,7 +55,7 @@ The result is a single-file (or small-set-of-files) Nim program that compiles to
 
 **5. Portability is a liveness property.** When the compiler checks whether code is "portable" (compiles to both JS and a server-side target), it's not enforcing correctness -- it's determining an operational fact about your code. Portable code *will run* regardless of whether the client is online: if the client is available, it runs there; if the client goes to sleep, the server takes over seamlessly. Non-portable code (anything that touches the DOM or browser APIs) can only run when the client is present. The compiler tells you which category each handler falls into, and the runtime handles the handoff transparently.
 
-**6. The proxy is powerful but domain-ignorant.** The server-side component manages credential injection, webhook routing, event log verification, state sync, portable handler execution, and auth. This is substantial machinery. But the proxy achieves all of this without domain knowledge. It doesn't know your data model, your business logic, or your schema. It processes event logs, verifies hash chains, swaps secrets, stores bytes, mints guarded-state events, and runs portable code. The complexity lives in the *protocol*, not in application-specific logic. If the proxy ever needs to understand *what* your application does (beyond the mechanical categories defined by the primitives), the architecture has failed.
+**6. The proxy is powerful but domain-ignorant.** The server-side component manages credential injection, webhook routing, event log verification, state sync, portable handler execution, and auth. This is substantial machinery. But the proxy achieves all of this without domain knowledge. It doesn't know your data model, your business logic, or your schema. It processes event logs, verifies sequence continuity, swaps secrets, stores bytes, mints guarded-state events, and runs portable code. The complexity lives in the *protocol*, not in application-specific logic. If the proxy ever needs to understand *what* your application does (beyond the mechanical categories defined by the primitives), the architecture has failed.
 
 **7. The framework is a compiler, not a runtime.** Generated artifacts run without the framework. Client JS runs in any browser without a Nim runtime. Server handlers run as standard Cloudflare Workers. SQL migrations run on any SQLite/Postgres instance. Cron configs work with any cron system. The framework is a development accelerator, not an operational dependency. Users can extract individual pieces (a cron job, an API handler, a database schema) and run them standalone.
 
@@ -88,7 +92,7 @@ let response = proxyFetch("https://api.openai.com/v1/chat/completions",
 
 A fetch call that routes through the proxy. If the request contains `secret()` markers, the proxy performs credential injection. If it doesn't contain any secrets, the compiler optimizes it to a direct client-side fetch.
 
-`proxyFetch` is the *primary* sync boundary. Every `proxyFetch` call carries the event log delta since the last successful sync. The proxy uses this log to: verify the hash chain is intact and events are unmodified, update the server-side state mirror, meter API usage, mint guarded-state events (e.g., credit deductions), and deliver any server-side results (webhook payloads, cron outputs) back to the client.
+`proxyFetch` is the *primary* sync boundary. Every `proxyFetch` call carries the event log delta since the last successful sync. The proxy uses this log to: verify sequence continuity (no gaps or conflicts), update the server-side state mirror, meter API usage, mint guarded-state events (e.g., credit deductions), and deliver any server-side results (webhook payloads, cron outputs) back to the client.
 
 **Secondary sync channels:** Because proxyFetch-only sync leaves purely-local sessions vulnerable (especially Safari's 7-day eviction), a lightweight hybrid sync strategy supplements the primary path:
 
@@ -247,12 +251,10 @@ Event {
     event_type: EventType,            # User action, API response, webhook, cron, proxy-minted
     schema_version: u32,              # Compiler-assigned version
     payload: bytes,                   # Serialized event data
-    state_hash_after: [u8; 32],       # SHA-256 of state after this event
-    parent_hash: [u8; 32],            # Hash of previous event (chain integrity)
 }
 ```
 
-The hash chain (`state_hash_after` + `parent_hash`) makes the log tamper-evident. The proxy can verify the chain without understanding the events -- it just checks that each event's `parent_hash` matches the previous event's hash.
+The sequence number provides ordering and continuity checking. The proxy verifies that incoming events start at the expected sequence (last stored + 1) with no gaps -- without needing to understand the events themselves.
 
 **Event classification (from game netcode's "external event log" pattern):**
 - **Pure computations** (safe blocks): deterministic by construction. Re-executed during replay.
@@ -281,17 +283,12 @@ This is NOT multiplayer. There is exactly one writer at any time -- either the c
 Verification happens at proxyFetch boundaries -- the moment before the proxy spends money on an external API call. The proxy:
 
 1. Receives the event log delta from the client
-2. Verifies the hash chain (each `parent_hash` matches the previous event)
-3. Optionally replays events through portable reducers (safe blocks) to verify `state_hash_after`
-4. If verification passes: injects secrets, forwards the API call, mints any guarded-state events
+2. Verifies sequence continuity (events start at expected sequence, no gaps)
+3. If verification passes: stores events, injects secrets, forwards the API call, mints any guarded-state events
+4. If verification fails: rejects with 409, returns server events for client reconciliation
 5. Returns: API response + proxy-generated events + any pending server events (webhooks/crons)
 
-This is the GGPO SyncTestSession pattern running in production: the client is the "normal" execution path, the server is the "replay" execution path. If their states agree via hash comparison, the client is verified.
-
-**Graduated divergence response (from game netcode):**
-1. **Single hash mismatch:** Log with full context. Use Merkle tree to identify which state domain diverged. Likely a determinism bug.
-2. **Repeated divergence:** Trigger full state comparison, identify the non-deterministic operation.
-3. **Unrecoverable divergence:** Server state is authoritative. Client accepts server state. Nuclear option -- equivalent to reconnecting after a game desync.
+The real security model is server-side enforcement: guards, quotas, and proxy-minted events. Sequence continuity ensures the client and server agree on event ordering, but the server is always authoritative. If the client's state diverges (stale cache, offline gap, bug), the server's events take precedence and the client reconciles.
 
 ### 4.5 Guarded State and Proxy-Minted Events
 
@@ -343,9 +340,11 @@ The event log grows indefinitely. To keep replay fast and storage bounded:
 - **Log truncation after snapshot:** Events before the oldest retained snapshot can be archived (R2) or deleted.
 - **Snapshot + Reset for major migrations:** Materialize current state, take a final snapshot, start a new log with a new schema version.
 
-### 4.8 State Hashing
+### 4.8 State Verification (Optional)
 
-Hierarchical Merkle tree over state domains:
+For debugging and development, the framework supports optional state verification: the server can replay events through portable reducers (safe blocks) and compare materialized state with the client's state. This is the GGPO SyncTestSession pattern — dual-execution verification.
+
+When states differ, a hierarchical Merkle tree over state domains enables O(log N) divergence localization:
 
 ```
 Root Hash = hash(
@@ -356,7 +355,7 @@ Root Hash = hash(
 )
 ```
 
-When root hashes differ between client and server, drill down to find which domain diverged. This is O(log N) instead of O(N) for divergence localization. Each event's `state_hash_after` is the root of this tree.
+This is a development/debugging tool, not a runtime gate. The primary verification is sequence continuity (Section 4.4). State verification catches determinism bugs in safe blocks during testing.
 
 ### 4.9 The WebSocket Channel
 
@@ -594,9 +593,7 @@ What proxyFetch and WebSocket messages actually look like on the wire. JSON for 
       "timestamp": "2026-02-08T14:30:00Z",
       "event_type": "user_action",
       "schema_version": 3,
-      "payload": {"action": "add_photo", "shoot_id": "s5", "url": "..."},
-      "state_hash_after": "a3f8...",
-      "parent_hash": "b7c1..."
+      "payload": {"action": "add_photo", "shoot_id": "s5", "url": "..."}
     }
   ],
   "request": {
@@ -618,16 +615,12 @@ What proxyFetch and WebSocket messages actually look like on the wire. JSON for 
     {
       "sequence": 1025,
       "event_type": "proxy_minted",
-      "payload": {"action": "credit_deducted", "amount": 1, "remaining": 42},
-      "state_hash_after": "d4e5...",
-      "parent_hash": "a3f8..."
+      "payload": {"action": "credit_deducted", "amount": 1, "remaining": 42}
     },
     {
       "sequence": 1026,
       "event_type": "webhook_result",
-      "payload": {"webhook_id": "wh_7", "data": {"image_url": "..."}},
-      "state_hash_after": "f6a7...",
-      "parent_hash": "d4e5..."
+      "payload": {"webhook_id": "wh_7", "data": {"image_url": "..."}}
     }
   ],
   "response": {
@@ -652,7 +645,8 @@ What proxyFetch and WebSocket messages actually look like on the wire. JSON for 
     "deleted_by": "user_alice"
   },
   "server_events": [
-    {"sequence": 1020, "event_type": "user_action",
+    {"sequence": 1020, "event_type": "user_action", "schema_version": 3,
+     "timestamp": "2026-02-08T14:25:00Z",
      "payload": {"action": "delete_shoot", "shoot_id": "s5"}}
   ]
 }
@@ -666,11 +660,11 @@ What proxyFetch and WebSocket messages actually look like on the wire. JSON for 
   "events": [
     {
       "sequence": 1030,
+      "timestamp": "2026-02-08T14:35:00Z",
       "event_type": "user_action",
       "origin_user": "user_bob",
-      "payload": {"action": "create_shoot", "name": "Sunset Shoot"},
-      "state_hash_after": "c8d9...",
-      "parent_hash": "b7c1..."
+      "schema_version": 3,
+      "payload": {"action": "create_shoot", "name": "Sunset Shoot"}
     }
   ]
 }
@@ -684,11 +678,11 @@ What proxyFetch and WebSocket messages actually look like on the wire. JSON for 
   "events": [
     {
       "sequence": 1031,
+      "timestamp": "2026-02-08T14:36:00Z",
       "event_type": "user_action",
       "origin_user": "user_alice",
-      "payload": {"action": "delete_shoot", "shoot_id": "s5"},
-      "state_hash_after": "e0f1...",
-      "parent_hash": "c8d9..."
+      "schema_version": 3,
+      "payload": {"action": "delete_shoot", "shoot_id": "s5"}
     }
   ]
 }
@@ -761,8 +755,8 @@ Router Worker (stateless)
   v
 User Durable Object
   |
-  | 3. Verify event log hash chain
-  | 4. Optionally replay for state verification
+  | 3. Verify event sequence continuity
+  | 4. Store verified events
   | 5. Inject secrets
   | 6. Forward API call (or delegate multi-call block)
   | 7. Mint guarded-state events
@@ -834,9 +828,8 @@ For every feature: (1) What standard format does it map to? (2) Can the generate
 **Key decisions:**
 - Event-sourced append-only log (inspired by LiveStore)
 - Lease-based single-writer (inspired by LiteFS)
-- Verification at cost-inducing boundaries (inspired by GGPO SyncTestSession)
-- Merkle tree for divergence localization (from game netcode)
-- Graduated divergence response (from game netcode)
+- Sequence-based continuity verification at cost-inducing boundaries
+- Optional state verification via dual-execution replay (inspired by GGPO SyncTestSession)
 - No CRDTs (distributed single-player, not multiplayer)
 
 ### 8.2 -- Asset Storage *(was Section 4.2)*
@@ -903,7 +896,7 @@ See the OrgShoots worked example and stress tests in Sections 4.10 and 10.
 
 **Real-time collaborative editing.** The `shared()` primitive supports multi-user organizations where people contribute to a shared pool (creating resources, adding items, managing state). It does NOT support multiple people editing the same document or field simultaneously. CRDTs and operational transforms are out of scope. The boundary: "multiple people contribute to a shared pool" is in; "multiple people edit the same thing at the same time" is out.
 
-**Domain-aware proxy logic.** The proxy never interprets the business meaning of API requests, events, or state. It processes logs, verifies hashes, swaps secrets, mints guarded events, and runs portable code. The guard mechanism is mechanical ("only proxy-minted events can increase this counter"), not semantic ("don't let credits go below zero" -- that's client-side business logic).
+**Domain-aware proxy logic.** The proxy never interprets the business meaning of API requests, events, or state. It processes logs, verifies sequence continuity, swaps secrets, mints guarded events, and runs portable code. The guard mechanism is mechanical ("only proxy-minted events can increase this counter"), not semantic ("don't let credits go below zero" -- that's client-side business logic).
 
 **Frontend framework.** The system is not a UI framework in the React/Vue/Svelte sense. It generates static HTML at compile time and JIT-loads minimal JS islands where interactivity is needed. You can build UI frameworks on top of this system.
 
@@ -928,7 +921,7 @@ This catches determinism bugs before they reach production. From GGPO experience
 
 ### Integration Tests
 
-- **Hash chain verification:** Generate a sequence of events, verify the chain is valid
+- **Sequence continuity:** Generate events, verify sequence continuity checking detects gaps and conflicts
 - **Lease transfer:** Simulate client going offline, server taking over, client reconnecting
 - **Guarded state:** Verify that forged proxy-minted events are rejected
 - **Schema evolution:** Apply upcasters to old events, verify resulting state
@@ -1034,7 +1027,7 @@ Phase 1: Foundation
   - Client JS that calls proxyFetch, verify round-trip
 
 Phase 2: State
-  - Event log: append events, hash chain, verify at proxyFetch boundary
+  - Event log: append events, sequence-based continuity, verify at proxyFetch boundary
   - IndexedDB storage on client, SQLite storage in DO
   - Validate: events survive browser refresh, DO restart
 
@@ -1072,7 +1065,7 @@ This vision doc should be updated as the build progresses. When an assumption is
 |---|---|---|---|
 | Event-sourced sync | LiveStore | Event -> materialized state pattern, push/pull model | On-demand sync timing (not continuous), proxyFetch piggybacking |
 | Single-writer lease | LiteFS | Lease acquisition/release, fencing tokens, rolling checksums | Browser-to-edge lease transfer, DO-based implementation |
-| State verification | GGPO SyncTestSession | Dual-execution verification, hash comparison | Verification at cost-inducing boundaries, Merkle tree |
+| State verification | GGPO SyncTestSession | Dual-execution verification, hash comparison | Optional state verification for debugging, sequence-based continuity at cost boundaries |
 | Schema evolution | Marten (event sourcing) | Upcasting, tolerant reader, snapshot+reset | Compiler as schema registry, safe-block-verified upcasters |
 | Auth | Oslo + Arctic | OAuth 2.0 flows, JWT, password hashing | Compiler-generated auth routes, declarative config |
 | Offline resilience | PouchDB, Firebase, WatermelonDB | Hybrid sync strategies | Lease-based offline handoff, server event generation |
