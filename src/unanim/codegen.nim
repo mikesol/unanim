@@ -184,6 +184,7 @@ proc generateDurableObjectJs*(): string =
   ## - Stores events via POST /events
   ## - Retrieves events via GET /events?since=N
   ## - Reports status via GET /status
+  ## - Verifies sequence continuity at /proxy boundary
   ## - Handles CORS preflight
   ##
   ## See VISION.md Section 4.2 (The Event Log)
@@ -207,69 +208,8 @@ export class UserDO {
       timestamp TEXT NOT NULL,
       event_type TEXT NOT NULL,
       schema_version INTEGER NOT NULL,
-      payload TEXT NOT NULL,
-      state_hash_after TEXT NOT NULL,
-      parent_hash TEXT NOT NULL
+      payload TEXT NOT NULL
     )`);
-  }
-
-  async sha256Hex(input) {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(input);
-    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
-  }
-
-  canonicalForm(event) {
-    return [
-      event.sequence.toString(),
-      event.timestamp,
-      event.event_type,
-      event.schema_version.toString(),
-      event.payload,
-      event.state_hash_after,
-      event.parent_hash,
-    ].join("|");
-  }
-
-  async hashEvent(event) {
-    const canonical = this.canonicalForm(event);
-    return await this.sha256Hex(canonical);
-  }
-
-  async computeStateHash(event) {
-    const forHashing = { ...event, state_hash_after: "" };
-    return await this.hashEvent(forHashing);
-  }
-
-  async verifyChain(events, anchorHash) {
-    let expectedParentHash = anchorHash;
-
-    for (let i = 0; i < events.length; i++) {
-      const event = events[i];
-
-      if (event.parent_hash !== expectedParentHash) {
-        return {
-          valid: false,
-          failedAt: i,
-          error: `Event ${event.sequence}: parent_hash mismatch. Expected ${expectedParentHash.slice(0, 16)}..., got ${event.parent_hash.slice(0, 16)}...`,
-        };
-      }
-
-      const computedStateHash = await this.computeStateHash(event);
-      if (event.state_hash_after !== computedStateHash) {
-        return {
-          valid: false,
-          failedAt: i,
-          error: `Event ${event.sequence}: state_hash_after mismatch. Expected ${computedStateHash.slice(0, 16)}..., got ${event.state_hash_after.slice(0, 16)}...`,
-        };
-      }
-
-      expectedParentHash = await this.hashEvent(event);
-    }
-
-    return { valid: true };
   }
 
   async fetch(request) {
@@ -323,14 +263,12 @@ export class UserDO {
 
     for (const event of events) {
       this.sql.exec(
-        `INSERT INTO events (sequence, timestamp, event_type, schema_version, payload, state_hash_after, parent_hash) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO events (sequence, timestamp, event_type, schema_version, payload) VALUES (?, ?, ?, ?, ?)`,
         event.sequence,
         event.timestamp,
         event.event_type,
         event.schema_version,
-        event.payload,
-        event.state_hash_after,
-        event.parent_hash
+        event.payload
       );
     }
 
@@ -342,7 +280,7 @@ export class UserDO {
 
   async getEvents(since, corsHeaders) {
     const rows = this.sql.exec(
-      `SELECT sequence, timestamp, event_type, schema_version, payload, state_hash_after, parent_hash FROM events WHERE sequence > ? ORDER BY sequence ASC`,
+      `SELECT sequence, timestamp, event_type, schema_version, payload FROM events WHERE sequence > ? ORDER BY sequence ASC`,
       since
     ).toArray();
 
@@ -381,44 +319,31 @@ export class UserDO {
     const body = await request.json();
     const { events_since, events, request: apiRequest } = body;
 
-    // Determine anchor hash: hashEvent(last_stored_event) or zeros for genesis.
-    // parentHash of the next event = hashEvent(previous) which hashes the full
-    // canonical form (including populated state_hash_after), so the anchor must
-    // be computed the same way — not just state_hash_after.
-    let anchorHash = "0".repeat(64);
+    // Determine expected next sequence from stored events
+    let expectedNextSeq = 1;
     if (events_since && events_since > 0) {
-      const anchorRows = this.sql.exec(
-        `SELECT sequence, timestamp, event_type, schema_version, payload, state_hash_after, parent_hash FROM events WHERE sequence = ?`,
-        events_since
-      ).toArray();
-      if (anchorRows.length > 0) {
-        anchorHash = await this.hashEvent(anchorRows[0]);
-      }
+      expectedNextSeq = events_since + 1;
     } else {
-      // Use last stored event's hash as anchor, or zeros if empty
-      const lastRows = this.sql.exec(
-        `SELECT sequence, timestamp, event_type, schema_version, payload, state_hash_after, parent_hash FROM events ORDER BY sequence DESC LIMIT 1`
-      ).toArray();
-      if (lastRows.length > 0) {
-        anchorHash = await this.hashEvent(lastRows[0]);
+      const lastRow = this.sql.exec(
+        `SELECT MAX(sequence) as latest FROM events`
+      ).one();
+      if (lastRow.latest) {
+        expectedNextSeq = lastRow.latest + 1;
       }
     }
 
-    // Verify incoming events chain from anchor
+    // Verify and store incoming events (sequence continuity check)
     if (events && events.length > 0) {
-      const verification = await this.verifyChain(events, anchorHash);
-      if (!verification.valid) {
-        // Fetch server events for the client to reconcile
+      if (events[0].sequence !== expectedNextSeq) {
         const sinceSeq = events_since || 0;
         const serverRows = this.sql.exec(
-          `SELECT sequence, timestamp, event_type, schema_version, payload, state_hash_after, parent_hash FROM events WHERE sequence > ? ORDER BY sequence ASC`,
+          `SELECT sequence, timestamp, event_type, schema_version, payload FROM events WHERE sequence > ? ORDER BY sequence ASC`,
           sinceSeq
         ).toArray();
 
         return new Response(JSON.stringify({
           events_accepted: false,
-          error: verification.error,
-          failed_at: verification.failedAt,
+          error: `Sequence gap: expected ${expectedNextSeq}, got ${events[0].sequence}`,
           server_events: serverRows,
           response: null,
         }), {
@@ -427,17 +352,30 @@ export class UserDO {
         });
       }
 
+      // Verify internal sequence continuity
+      for (let i = 1; i < events.length; i++) {
+        if (events[i].sequence !== events[i - 1].sequence + 1) {
+          return new Response(JSON.stringify({
+            events_accepted: false,
+            error: `Sequence gap at event ${i}: expected ${events[i - 1].sequence + 1}, got ${events[i].sequence}`,
+            server_events: [],
+            response: null,
+          }), {
+            status: 409,
+            headers: corsHeaders,
+          });
+        }
+      }
+
       // Store verified events
       for (const event of events) {
         this.sql.exec(
-          `INSERT INTO events (sequence, timestamp, event_type, schema_version, payload, state_hash_after, parent_hash) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO events (sequence, timestamp, event_type, schema_version, payload) VALUES (?, ?, ?, ?, ?)`,
           event.sequence,
           event.timestamp,
           event.event_type,
           event.schema_version,
-          event.payload,
-          event.state_hash_after,
-          event.parent_hash
+          event.payload
         );
       }
     }
