@@ -1,0 +1,28 @@
+# Unanim Generated Wrangler Configuration
+# SCAFFOLD(phase1, #4): Stateless Worker config.
+# This config is standalone — use with any Cloudflare Workers project.
+
+name = "unanim-todo"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Secret bindings — set actual values with: wrangler secret put <NAME>
+# The following secrets are referenced in the application:
+#   TEST_API_KEY  (from secret("test-api-key"))
+
+# To configure all secrets:
+#   wrangler secret put TEST_API_KEY
+
+[vars]
+# Non-secret environment variables can be added here
+
+# [IMPORTANT] Secrets must be set via `wrangler secret put`, not in this file.
+# The Worker reads them from env.TEST_API_KEY etc.
+
+[durable_objects]
+bindings = [{ name = "USER_DO", class_name = "UserDO" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDO"]

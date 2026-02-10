@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Unanim Todo</title>
+<style>body{font-family:monospace;max-width:600px;margin:20px auto}button{margin:2px}li{padding:4px 0}#log{background:#f0f0f0;padding:8px;font-size:12px;max-height:200px;overflow-y:auto}</style>
+</head>
+<body>
+<h2>Unanim Todo</h2>
+<div id="status">Loading...</div>
+<div><input id="todo-input" placeholder="Add todo..." /><button onclick="addTodo()">Add</button></div>
+<ul id="todo-list"></ul>
+<div><button onclick="doSync()">Sync (proxyFetch)</button><button onclick="doSyncOnly()">Sync Only</button></div>
+<div id="todo-count"></div>
+<h3>Log</h3>
+<pre id="log"></pre>
+<script>
+const unanimDB = (() => {
+  const DB_NAME = "unanim_events";
+  const DB_VERSION = 1;
+  const STORE_NAME = "events";
+
+  function openDatabase() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, DB_VERSION);
+      request.onupgradeneeded = (event) => {
+        const db = event.target.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          const store = db.createObjectStore(STORE_NAME, { keyPath: "sequence" });
+          store.createIndex("event_type", "event_type", { unique: false });
+          store.createIndex("timestamp", "timestamp", { unique: false });
+        }
+      };
+      request.onsuccess = (event) => {
+        resolve(event.target.result);
+      };
+      request.onerror = (event) => {
+        reject(event.target.error);
+      };
+    });
+  }
+
+  function appendEvents(events) {
+    return openDatabase().then((db) => {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        const store = tx.objectStore(STORE_NAME);
+        for (const event of events) {
+          store.put(event);
+        }
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = (event) => {
+          db.close();
+          reject(event.target.error);
+        };
+      });
+    });
+  }
+
+  function getEventsSince(sequence) {
+    return openDatabase().then((db) => {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const store = tx.objectStore(STORE_NAME);
+        const range = IDBKeyRange.lowerBound(sequence, true);
+        const request = store.openCursor(range);
+        const results = [];
+        request.onsuccess = (event) => {
+          const cursor = event.target.result;
+          if (cursor) {
+            results.push(cursor.value);
+            cursor.continue();
+          } else {
+            db.close();
+            resolve(results);
+          }
+        };
+        request.onerror = (event) => {
+          db.close();
+          reject(event.target.error);
+        };
+      });
+    });
+  }
+
+  function getLatestEvent() {
+    return openDatabase().then((db) => {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const store = tx.objectStore(STORE_NAME);
+        const request = store.openCursor(null, "prev");
+        request.onsuccess = (event) => {
+          const cursor = event.target.result;
+          db.close();
+          resolve(cursor ? cursor.value : null);
+        };
+        request.onerror = (event) => {
+          db.close();
+          reject(event.target.error);
+        };
+      });
+    });
+  }
+
+  function getAllEvents() {
+    return openDatabase().then((db) => {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const store = tx.objectStore(STORE_NAME);
+        const request = store.getAll();
+        request.onsuccess = (event) => {
+          db.close();
+          resolve(event.target.result);
+        };
+        request.onerror = (event) => {
+          db.close();
+          reject(event.target.error);
+        };
+      });
+    });
+  }
+
+  return {
+    openDatabase,
+    appendEvents,
+    getEventsSince,
+    getLatestEvent,
+    getAllEvents
+  };
+})();
+
+</script>
+<script>
+const unanimSync = (() => {
+  const SYNC_DB_NAME = "unanim_sync_meta";
+  const SYNC_DB_VERSION = 1;
+  const SYNC_STORE = "meta";
+
+  function openSyncMeta() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(SYNC_DB_NAME, SYNC_DB_VERSION);
+      request.onupgradeneeded = (event) => {
+        const db = event.target.result;
+        if (!db.objectStoreNames.contains(SYNC_STORE)) {
+          db.createObjectStore(SYNC_STORE, { keyPath: "key" });
+        }
+      };
+      request.onsuccess = (event) => resolve(event.target.result);
+      request.onerror = (event) => reject(event.target.error);
+    });
+  }
+
+  function getLastSyncedSequence() {
+    return openSyncMeta().then((db) => {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(SYNC_STORE, "readonly");
+        const store = tx.objectStore(SYNC_STORE);
+        const request = store.get("last_synced_sequence");
+        request.onsuccess = (event) => {
+          db.close();
+          const record = event.target.result;
+          resolve(record ? record.value : 0);
+        };
+        request.onerror = (event) => {
+          db.close();
+          reject(event.target.error);
+        };
+      });
+    });
+  }
+
+  function setLastSyncedSequence(seq) {
+    return openSyncMeta().then((db) => {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(SYNC_STORE, "readwrite");
+        const store = tx.objectStore(SYNC_STORE);
+        store.put({ key: "last_synced_sequence", value: seq });
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = (event) => {
+          db.close();
+          reject(event.target.error);
+        };
+      });
+    });
+  }
+
+  async function reconcile409(data) {
+    // Server rejected our events — accept server state as authoritative
+    if (data.server_events && data.server_events.length > 0) {
+      await unanimDB.appendEvents(data.server_events);
+    }
+    const latest = await unanimDB.getLatestEvent();
+    if (latest) {
+      await setLastSyncedSequence(latest.sequence);
+    }
+  }
+
+  async function processResponse(response, isProxy) {
+    if (!response.ok && response.status !== 409) {
+      throw new Error("Sync request failed: " + response.status);
+    }
+    const data = await response.json();
+
+    if (data.events_accepted) {
+      // Store any server events the client hasn't seen
+      if (data.server_events && data.server_events.length > 0) {
+        await unanimDB.appendEvents(data.server_events);
+      }
+      // Update last synced sequence to highest known
+      const latest = await unanimDB.getLatestEvent();
+      if (latest) {
+        await setLastSyncedSequence(latest.sequence);
+      }
+      return isProxy ? data.response : data;
+    }
+
+    // 409: server rejected — reconcile and signal retry needed
+    if (response.status === 409) {
+      await reconcile409(data);
+      return { _retry: true, error: data.error };
+    }
+
+    return isProxy ? data.response : data;
+  }
+
+  async function doFetch(endpoint, body, userId) {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-User-Id": userId
+      },
+      body: JSON.stringify(body)
+    });
+    return response;
+  }
+
+  async function proxyFetch(workerUrl, url, options) {
+    options = options || {};
+    const userId = options.userId || "default-user";
+    const maxRetries = 1;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const lastSeq = await getLastSyncedSequence();
+      const events = await unanimDB.getEventsSince(lastSeq);
+
+      const body = {
+        events_since: lastSeq,
+        events: events,
+        request: {
+          url: url,
+          headers: options.headers || {},
+          method: options.method || "POST",
+          body: options.body || ""
+        }
+      };
+
+      try {
+        const response = await doFetch(workerUrl + "/do/proxy", body, userId);
+        const result = await processResponse(response, true);
+        if (result && result._retry && attempt < maxRetries) {
+          continue;
+        }
+        if (result && result._retry) {
+          return { rejected: true, error: result.error };
+        }
+        return result;
+      } catch (err) {
+        // Network error — events are already in IndexedDB (queued)
+        throw { offline: true, queued: true, error: err.message };
+      }
+    }
+  }
+
+  async function sync(workerUrl, options) {
+    options = options || {};
+    const userId = options.userId || "default-user";
+    const maxRetries = 1;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const lastSeq = await getLastSyncedSequence();
+      const events = await unanimDB.getEventsSince(lastSeq);
+
+      const body = {
+        events_since: lastSeq,
+        events: events
+      };
+
+      try {
+        const response = await doFetch(workerUrl + "/do/sync", body, userId);
+        const result = await processResponse(response, false);
+        if (result && result._retry && attempt < maxRetries) {
+          continue;
+        }
+        if (result && result._retry) {
+          return { rejected: true, error: result.error };
+        }
+        return result;
+      } catch (err) {
+        throw { offline: true, queued: true, error: err.message };
+      }
+    }
+  }
+
+  return {
+    proxyFetch,
+    sync,
+    getLastSyncedSequence,
+    setLastSyncedSequence
+  };
+})();
+
+</script>
+<script>
+const WORKER_URL = "https://unanim-todo.mike-solomon.workers.dev";
+const log = (msg) => {
+  const el = document.getElementById("log");
+  if (el) el.textContent += new Date().toLocaleTimeString() + " " + msg + "\n";
+  console.log(msg);
+};
+
+let nextSequence = 1;
+
+async function init() {
+  await unanimDB.openDatabase();
+  const events = await unanimDB.getAllEvents();
+  if (events.length > 0) {
+    nextSequence = events[events.length - 1].sequence + 1;
+  }
+  renderTodos(events);
+  updateStatus();
+  log("Todo app initialized. " + events.length + " events loaded from IndexedDB.");
+}
+
+function todosFromEvents(events) {
+  const todos = {};
+  for (const e of events) {
+    try {
+      const p = JSON.parse(e.payload);
+      if (p.action === "add") {
+        todos[p.id] = { id: p.id, text: p.text, done: false };
+      } else if (p.action === "toggle" && todos[p.id]) {
+        todos[p.id].done = !todos[p.id].done;
+      } else if (p.action === "delete") {
+        delete todos[p.id];
+      }
+    } catch (err) { /* skip non-todo events */ }
+  }
+  return Object.values(todos);
+}
+
+function renderTodos(events) {
+  const todos = todosFromEvents(events);
+  const list = document.getElementById("todo-list");
+  list.innerHTML = "";
+  for (const todo of todos) {
+    const li = document.createElement("li");
+    li.textContent = (todo.done ? "[x] " : "[ ] ") + todo.text;
+    li.style.cursor = "pointer";
+    li.style.textDecoration = todo.done ? "line-through" : "none";
+    li.onclick = () => toggleTodo(todo.id);
+    const delBtn = document.createElement("button");
+    delBtn.textContent = "x";
+    delBtn.style.marginLeft = "8px";
+    delBtn.onclick = (e) => { e.stopPropagation(); deleteTodo(todo.id); };
+    li.appendChild(delBtn);
+    list.appendChild(li);
+  }
+  document.getElementById("todo-count").textContent = todos.length + " todos";
+}
+
+async function addTodo() {
+  const input = document.getElementById("todo-input");
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  const id = "todo-" + Date.now();
+  const event = {
+    sequence: nextSequence++,
+    timestamp: new Date().toISOString(),
+    event_type: "user_action",
+    schema_version: 1,
+    payload: JSON.stringify({ action: "add", id: id, text: text })
+  };
+  await unanimDB.appendEvents([event]);
+  const events = await unanimDB.getAllEvents();
+  renderTodos(events);
+  updateStatus();
+  log("Added todo: " + text);
+}
+
+async function toggleTodo(id) {
+  const event = {
+    sequence: nextSequence++,
+    timestamp: new Date().toISOString(),
+    event_type: "user_action",
+    schema_version: 1,
+    payload: JSON.stringify({ action: "toggle", id: id })
+  };
+  await unanimDB.appendEvents([event]);
+  const events = await unanimDB.getAllEvents();
+  renderTodos(events);
+  updateStatus();
+  log("Toggled todo: " + id);
+}
+
+async function deleteTodo(id) {
+  const event = {
+    sequence: nextSequence++,
+    timestamp: new Date().toISOString(),
+    event_type: "user_action",
+    schema_version: 1,
+    payload: JSON.stringify({ action: "delete", id: id })
+  };
+  await unanimDB.appendEvents([event]);
+  const events = await unanimDB.getAllEvents();
+  renderTodos(events);
+  updateStatus();
+  log("Deleted todo: " + id);
+}
+
+async function doSync() {
+  log("Syncing via proxyFetch...");
+  const start = performance.now();
+  try {
+    const result = await unanimSync.proxyFetch(WORKER_URL,
+      "https://httpbin.org/post", {
+        method: "POST",
+        headers: { "Content-Type": "application/json",
+                   "Authorization": "Bearer <<SECRET:test-api-key>>" },
+        body: JSON.stringify({ app: "unanim-todo", action: "sync" }),
+        userId: "todo-user-1"
+      });
+    const elapsed = (performance.now() - start).toFixed(0);
+    if (result && result.rejected) {
+      log("Sync 409 — reconciled. Retried. " + elapsed + "ms");
+    } else {
+      log("Sync OK. " + elapsed + "ms");
+    }
+  } catch (err) {
+    if (err.offline) {
+      log("Offline — events queued locally.");
+    } else {
+      log("Sync error: " + (err.message || JSON.stringify(err)));
+    }
+  }
+  updateStatus();
+}
+
+async function doSyncOnly() {
+  log("Sync-only (no API call)...");
+  const start = performance.now();
+  try {
+    const result = await unanimSync.sync(WORKER_URL, {
+      userId: "todo-user-1"
+    });
+    const elapsed = (performance.now() - start).toFixed(0);
+    if (result && result.rejected) {
+      log("Sync-only 409 — reconciled. " + elapsed + "ms");
+    } else {
+      log("Sync-only OK. " + elapsed + "ms");
+    }
+  } catch (err) {
+    if (err.offline) {
+      log("Offline — events queued locally.");
+    } else {
+      log("Sync-only error: " + (err.message || JSON.stringify(err)));
+    }
+  }
+  updateStatus();
+}
+
+async function updateStatus() {
+  const events = await unanimDB.getAllEvents();
+  const lastSynced = await unanimSync.getLastSyncedSequence();
+  const latest = events.length > 0 ? events[events.length - 1].sequence : 0;
+  const unsynced = latest - lastSynced;
+  document.getElementById("status").textContent =
+    "Local events: " + events.length +
+    " | Last synced seq: " + lastSynced +
+    " | Unsynced: " + unsynced;
+}
+
+// Handle Enter key in input
+document.getElementById("todo-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") addTodo();
+});
+
+init();
+
+</script>
+</body>
+</html>
