@@ -239,6 +239,35 @@ export class UserDO {
     return await this.sha256Hex(canonical);
   }
 
+  async verifyChain(events, anchorHash) {
+    let expectedParentHash = anchorHash;
+
+    for (let i = 0; i < events.length; i++) {
+      const event = events[i];
+
+      if (event.parent_hash !== expectedParentHash) {
+        return {
+          valid: false,
+          failedAt: i,
+          error: `Event ${event.sequence}: parent_hash mismatch. Expected ${expectedParentHash.slice(0, 16)}..., got ${event.parent_hash.slice(0, 16)}...`,
+        };
+      }
+
+      const computedHash = await this.hashEvent(event);
+      if (event.state_hash_after !== computedHash) {
+        return {
+          valid: false,
+          failedAt: i,
+          error: `Event ${event.sequence}: state_hash_after mismatch. Expected ${computedHash.slice(0, 16)}..., got ${event.state_hash_after.slice(0, 16)}...`,
+        };
+      }
+
+      expectedParentHash = event.state_hash_after;
+    }
+
+    return { valid: true };
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
     const path = url.pathname;

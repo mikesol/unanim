@@ -380,4 +380,14 @@ block testDurableObjectHashing:
 
 echo "test_codegen: Task 24 passed."
 
+# --- Task 25: DO has hash chain verification ---
+block testDurableObjectVerification:
+  let js = generateDurableObjectJs()
+  doAssert "verifyChain" in js,
+    "DO should have verifyChain method"
+  doAssert "parent_hash" in js,
+    "DO verification should check parent_hash linkage"
+
+echo "test_codegen: Task 25 passed."
+
 echo "All codegen tests passed."
