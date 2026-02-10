@@ -438,4 +438,48 @@ block testDurableObjectProxyBidirectionalEvents:
 
 echo "test_codegen: Task 29 passed."
 
+# --- Task 30: DO has /sync endpoint ---
+block testDurableObjectSyncEndpoint:
+  let js = generateDurableObjectJs()
+  doAssert "handleSync" in js,
+    "DO should have handleSync method"
+  doAssert "\"/sync\"" in js,
+    "DO fetch should route /sync path"
+
+echo "test_codegen: Task 30a passed."
+
+block testDurableObjectSyncRequestFormat:
+  let js = generateDurableObjectJs()
+  doAssert "events_since" in js,
+    "DO /sync should read events_since"
+
+echo "test_codegen: Task 30b passed."
+
+block testDurableObjectSyncResponseFormat:
+  let js = generateDurableObjectJs()
+  doAssert "events_accepted" in js,
+    "DO /sync response should include events_accepted"
+
+echo "test_codegen: Task 30c passed."
+
+# --- Task 31: DO /sync uses same sequence verification as /proxy ---
+block testDurableObjectSyncSequenceVerification:
+  let js = generateDurableObjectJs()
+  let proxyPos = js.find("handleProxy")
+  let syncPos = js.find("handleSync")
+  doAssert proxyPos > 0 and syncPos > 0,
+    "Both handleProxy and handleSync must exist"
+  doAssert js.count("409") >= 2,
+    "Both /proxy and /sync should return 409 on sequence mismatch"
+
+echo "test_codegen: Task 31 passed."
+
+# --- Task 32: DO /sync uses getServerEventsSince ---
+block testDurableObjectSyncUsesServerEvents:
+  let js = generateDurableObjectJs()
+  doAssert js.count("getServerEventsSince") >= 3,
+    "getServerEventsSince should be defined once and called in both handleProxy and handleSync"
+
+echo "test_codegen: Task 32 passed."
+
 echo "All codegen tests passed."
