@@ -18,4 +18,5 @@ task test, "Run tests":
   exec "nim c -r tests/test_clientgen.nim"
   exec "nim c -r tests/test_clientgen_jscompile.nim"
   exec "nim c -r tests/test_eventlog.nim"
+  exec "nim c -r tests/test_guard.nim"
   exec "nim c -r tests/test_budget.nim"
