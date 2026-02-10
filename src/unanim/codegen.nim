@@ -11,6 +11,7 @@ import std/macrocache
 import std/strutils
 import ./secret
 import ./proxyfetch
+import ./guard
 import ./cron
 import ./after
 import ./webhook
@@ -210,7 +211,8 @@ proc generateWorkerJs*(secrets: seq[string], routes: seq[RouteInfo],
 
   result &= "};\n"
 
-proc generateDurableObjectJs*(webhookPaths: seq[string] = @[],
+proc generateDurableObjectJs*(guardedStates: seq[string] = @[],
+                              webhookPaths: seq[string] = @[],
                               hasCron: bool = false, hasAfter: bool = false): string =
   ## Generate a Durable Object ES module class with SQLite event storage.
   ## The DO:
@@ -220,11 +222,21 @@ proc generateDurableObjectJs*(webhookPaths: seq[string] = @[],
   ## - Reports status via GET /status
   ## - Verifies sequence continuity at /proxy boundary
   ## - Handles CORS preflight
+  ## - Rejects client-submitted proxy_minted events (guard enforcement)
+  ## - Provides mintProxyEvent for server-side event generation
   ## - When webhookPaths is non-empty, handles incoming webhook requests
   ## - When hasCron: handles /cron route for scheduled execution
   ## - When hasAfter: handles DO Alarms for delayed execution
   ##
   ## See VISION.md Section 4.2 (The Event Log)
+
+
+  # Build the guarded states JS array literal
+  var guardedStatesJs = "["
+  for i, s in guardedStates:
+    if i > 0: guardedStatesJs &= ", "
+    guardedStatesJs &= "\"" & s & "\""
+  guardedStatesJs &= "]"
 
   # Section 1: Header and constructor
   result = "// Unanim Generated Durable Object\n"
@@ -236,6 +248,7 @@ proc generateDurableObjectJs*(webhookPaths: seq[string] = @[],
   result &= "    this.state = state;\n"
   result &= "    this.env = env;\n"
   result &= "    this.sql = state.storage.sql;\n"
+  result &= "    this.guardedStates = " & guardedStatesJs & ";\n"
   result &= "    this.state.blockConcurrencyWhile(async () => {\n"
   result &= "      await this.initialize();\n"
   result &= "    });\n"
@@ -319,10 +332,33 @@ proc generateDurableObjectJs*(webhookPaths: seq[string] = @[],
   result &= "  }\n"
   result &= "\n"
 
+  # Section 3b: rejectClientProxyMinted (guard enforcement)
+  result &= "  rejectClientProxyMinted(events) {\n"
+  result &= "    // Guard enforcement: clients cannot submit proxy_minted events.\n"
+  result &= "    // Only the DO itself (via mintProxyEvent) can create proxy_minted events.\n"
+  result &= "    if (!events || events.length === 0) return null;\n"
+  result &= "    for (const event of events) {\n"
+  result &= "      if (event.event_type === \"proxy_minted\") {\n"
+  result &= "        return \"Client cannot submit proxy_minted events. Only the server can mint these events.\";\n"
+  result &= "      }\n"
+  result &= "    }\n"
+  result &= "    return null;\n"
+  result &= "  }\n"
+  result &= "\n"
+
   # Section 4: storeEvents
   result &= "  async storeEvents(request, corsHeaders) {\n"
   result &= "    const body = await request.json();\n"
   result &= "    const events = Array.isArray(body) ? body : [body];\n"
+  result &= "\n"
+  result &= "    // Guard enforcement: reject client-submitted proxy_minted events\n"
+  result &= "    const guardError = this.rejectClientProxyMinted(events);\n"
+  result &= "    if (guardError) {\n"
+  result &= "      return new Response(JSON.stringify({ error: guardError }), {\n"
+  result &= "        status: 403,\n"
+  result &= "        headers: corsHeaders,\n"
+  result &= "      });\n"
+  result &= "    }\n"
   result &= "\n"
   result &= "    for (const event of events) {\n"
   result &= "      this.sql.exec(\n"
@@ -395,8 +431,49 @@ proc generateDurableObjectJs*(webhookPaths: seq[string] = @[],
   result &= "  }\n"
   result &= "\n"
 
+  # Section 8b: mintProxyEvent (guard support)
+  result &= "  mintProxyEvent(payload) {\n"
+  result &= "    // SCAFFOLD(phase4, #36): Server-side proxy event minting.\n"
+  result &= "    // Only the DO itself can call this method to create proxy_minted events.\n"
+  result &= "    // This is the mechanism for guarded state increases (e.g., crediting after API call).\n"
+  result &= "    const lastRow = this.sql.exec(\n"
+  result &= "      `SELECT MAX(sequence) as latest FROM events`\n"
+  result &= "    ).one();\n"
+  result &= "    const nextSeq = (lastRow.latest || 0) + 1;\n"
+  result &= "    const event = {\n"
+  result &= "      sequence: nextSeq,\n"
+  result &= "      timestamp: new Date().toISOString(),\n"
+  result &= "      event_type: \"proxy_minted\",\n"
+  result &= "      schema_version: 1,\n"
+  result &= "      payload: typeof payload === \"string\" ? payload : JSON.stringify(payload),\n"
+  result &= "    };\n"
+  result &= "    this.sql.exec(\n"
+  result &= "      `INSERT INTO events (sequence, timestamp, event_type, schema_version, payload) VALUES (?, ?, ?, ?, ?)`,\n"
+  result &= "      event.sequence,\n"
+  result &= "      event.timestamp,\n"
+  result &= "      event.event_type,\n"
+  result &= "      event.schema_version,\n"
+  result &= "      event.payload\n"
+  result &= "    );\n"
+  result &= "    return event;\n"
+  result &= "  }\n"
+  result &= "\n"
+
   # Section 9: verifyAndStoreEvents
   result &= "  async verifyAndStoreEvents(events_since, events, corsHeaders) {\n"
+  result &= "    // Guard enforcement: reject client-submitted proxy_minted events\n"
+  result &= "    const guardError = this.rejectClientProxyMinted(events);\n"
+  result &= "    if (guardError) {\n"
+  result &= "      return { error: new Response(JSON.stringify({\n"
+  result &= "        events_accepted: false,\n"
+  result &= "        error: guardError,\n"
+  result &= "        response: null,\n"
+  result &= "      }), {\n"
+  result &= "        status: 403,\n"
+  result &= "        headers: corsHeaders,\n"
+  result &= "      }) };\n"
+  result &= "    }\n"
+  result &= "\n"
   result &= "    // Determine expected next sequence from stored events\n"
   result &= "    let expectedNextSeq = 1;\n"
   result &= "    if (events_since && events_since > 0) {\n"
@@ -787,6 +864,11 @@ proc generateArtifacts*(appName: string, outputDir: string) {.compileTime.} =
       ))
       inc routeIndex
 
+  # Collect guarded states from the guard registry
+  var guardedStates: seq[string] = @[]
+  for item in guardRegistry:
+    guardedStates.add(item.strVal)
+
   # Collect webhook paths from the webhook registry
   var webhookPaths: seq[string] = @[]
   for item in webhookRegistry:
@@ -805,7 +887,8 @@ proc generateArtifacts*(appName: string, outputDir: string) {.compileTime.} =
   let workerJs = generateWorkerJs(secrets, routes, hasDO = true,
                                    webhookPaths = webhookPaths,
                                    cronSchedules = cronSchedules)
-  let durableObjectJs = generateDurableObjectJs(webhookPaths = webhookPaths,
+  let durableObjectJs = generateDurableObjectJs(guardedStates = guardedStates,
+                                                 webhookPaths = webhookPaths,
                                                  hasCron = hasCronHandlers,
                                                  hasAfter = hasAfterHandlers)
   let combinedJs = workerJs & "\n" & durableObjectJs
