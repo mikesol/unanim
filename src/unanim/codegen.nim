@@ -12,6 +12,7 @@ import std/strutils
 import ./secret
 import ./proxyfetch
 import ./guard
+import ./webhook
 
 type
   SecretBinding* = object
@@ -28,7 +29,8 @@ proc sanitizeEnvVar*(name: string): string =
   result = name.toUpperAscii().replace("-", "_").replace(".", "_")
 
 proc generateWorkerJs*(secrets: seq[string], routes: seq[RouteInfo],
-                       hasDO: bool = false): string =
+                       hasDO: bool = false,
+                       webhookPaths: seq[string] = @[]): string =
   ## Generate a standalone Cloudflare Worker JS file (ES modules format).
   ## The Worker:
   ## - Accepts POST requests with JSON body containing target URL and headers
@@ -65,11 +67,26 @@ proc generateWorkerJs*(secrets: seq[string], routes: seq[RouteInfo],
   result &= "      });\n"
   result &= "    }\n"
 
-  # Section 3: DO routing (only when hasDO is true)
+  # Section 3a: Webhook routing (only when webhookPaths is non-empty)
+  if webhookPaths.len > 0:
+    result &= "\n"
+    result &= "    // Route webhook endpoints to Durable Objects\n"
+    result &= "    const reqUrl = new URL(request.url);\n"
+    result &= "    if (reqUrl.pathname.startsWith(\"/webhook/\")) {\n"
+    result &= "      // Webhook requests don't require X-User-Id — they come from external services\n"
+    result &= "      // Route to a system-level DO for webhook processing\n"
+    result &= "      const doId = env.USER_DO.idFromName(\"__webhook__\");\n"
+    result &= "      const doStub = env.USER_DO.get(doId);\n"
+    result &= "      return doStub.fetch(new Request(request.url, request));\n"
+    result &= "    }\n"
+
+  # Section 3b: DO routing (only when hasDO is true)
   if hasDO:
     result &= "\n"
     result &= "    // Route /do/* requests to Durable Objects\n"
-    result &= "    const reqUrl = new URL(request.url);\n"
+    if webhookPaths.len == 0:
+      # reqUrl not yet declared (no webhook block above)
+      result &= "    const reqUrl = new URL(request.url);\n"
     result &= "    if (reqUrl.pathname.startsWith(\"/do/\")) {\n"
     result &= "      const userId = request.headers.get(\"X-User-Id\") || reqUrl.searchParams.get(\"user_id\");\n"
     result &= "      if (!userId) {\n"
@@ -178,7 +195,8 @@ proc generateWorkerJs*(secrets: seq[string], routes: seq[RouteInfo],
   result &= "  },\n"
   result &= "};\n"
 
-proc generateDurableObjectJs*(guardedStates: seq[string] = @[]): string =
+proc generateDurableObjectJs*(guardedStates: seq[string] = @[],
+                              webhookPaths: seq[string] = @[]): string =
   ## Generate a Durable Object ES module class with SQLite event storage.
   ## The DO:
   ## - Creates an events table in SQLite on initialization
@@ -189,6 +207,7 @@ proc generateDurableObjectJs*(guardedStates: seq[string] = @[]): string =
   ## - Handles CORS preflight
   ## - Rejects client-submitted proxy_minted events (guard enforcement)
   ## - Provides mintProxyEvent for server-side event generation
+  ## - When webhookPaths is non-empty, handles incoming webhook requests
   ##
   ## See VISION.md Section 4.2 (The Event Log)
 
@@ -199,7 +218,7 @@ proc generateDurableObjectJs*(guardedStates: seq[string] = @[]): string =
     guardedStatesJs &= "\"" & s & "\""
   guardedStatesJs &= "]"
 
-  result = """// Unanim Generated Durable Object
+  var baseJs = """// Unanim Generated Durable Object
 // Event storage backed by SQLite via Cloudflare Durable Objects.
 // This class is standalone — copy to a fresh Cloudflare project and it works.
 
@@ -562,6 +581,78 @@ export class UserDO {
 }
 """
 
+  if webhookPaths.len > 0:
+    # Inject webhook route into the fetch method's try block (before the 404 else)
+    let webhookRouteJs = "      } else if (path.startsWith(\"/webhook/\")) {\n" &
+                         "        return await this.handleWebhook(request, path, corsHeaders);\n"
+    # Replace the "} else {" (404 block) with webhook route + original else
+    baseJs = baseJs.replace(
+      "      } else {\n        return new Response(JSON.stringify({ error: \"Not found\" }),",
+      webhookRouteJs &
+      "      } else {\n        return new Response(JSON.stringify({ error: \"Not found\" }),"
+    )
+
+    # Add handleWebhook method before the closing brace of the class
+    var webhookMethod = "\n  async handleWebhook(request, path, corsHeaders) {\n"
+    webhookMethod &= "    // SCAFFOLD(phase4, #37): Signature verification goes here\n"
+    webhookMethod &= "    // Each webhook path would have its own verification logic\n"
+    webhookMethod &= "    // (e.g., Stripe uses HMAC-SHA256, Clerk uses Svix, etc.)\n"
+    webhookMethod &= "\n"
+    webhookMethod &= "    if (request.method !== \"POST\") {\n"
+    webhookMethod &= "      return new Response(JSON.stringify({ error: \"Webhooks only accept POST requests\" }), {\n"
+    webhookMethod &= "        status: 405,\n"
+    webhookMethod &= "        headers: corsHeaders,\n"
+    webhookMethod &= "      });\n"
+    webhookMethod &= "    }\n"
+    webhookMethod &= "\n"
+    webhookMethod &= "    let payload;\n"
+    webhookMethod &= "    try {\n"
+    webhookMethod &= "      payload = await request.json();\n"
+    webhookMethod &= "    } catch (e) {\n"
+    webhookMethod &= "      return new Response(JSON.stringify({ error: \"Invalid JSON payload\" }), {\n"
+    webhookMethod &= "        status: 400,\n"
+    webhookMethod &= "        headers: corsHeaders,\n"
+    webhookMethod &= "      });\n"
+    webhookMethod &= "    }\n"
+    webhookMethod &= "\n"
+    webhookMethod &= "    // Get next sequence number\n"
+    webhookMethod &= "    const lastRow = this.sql.exec(`SELECT MAX(sequence) as latest FROM events`).one();\n"
+    webhookMethod &= "    const nextSeq = (lastRow.latest || 0) + 1;\n"
+    webhookMethod &= "\n"
+    webhookMethod &= "    // Store webhook_result event\n"
+    webhookMethod &= "    const event = {\n"
+    webhookMethod &= "      sequence: nextSeq,\n"
+    webhookMethod &= "      timestamp: new Date().toISOString(),\n"
+    webhookMethod &= "      event_type: \"webhook_result\",\n"
+    webhookMethod &= "      schema_version: 1,\n"
+    webhookMethod &= "      payload: JSON.stringify({ webhook_path: path, data: payload }),\n"
+    webhookMethod &= "    };\n"
+    webhookMethod &= "\n"
+    webhookMethod &= "    this.sql.exec(\n"
+    webhookMethod &= "      `INSERT INTO events (sequence, timestamp, event_type, schema_version, payload) VALUES (?, ?, ?, ?, ?)`,\n"
+    webhookMethod &= "      event.sequence,\n"
+    webhookMethod &= "      event.timestamp,\n"
+    webhookMethod &= "      event.event_type,\n"
+    webhookMethod &= "      event.schema_version,\n"
+    webhookMethod &= "      event.payload\n"
+    webhookMethod &= "    );\n"
+    webhookMethod &= "\n"
+    webhookMethod &= "    return new Response(JSON.stringify({\n"
+    webhookMethod &= "      received: true,\n"
+    webhookMethod &= "      sequence: event.sequence,\n"
+    webhookMethod &= "      webhook_path: path,\n"
+    webhookMethod &= "    }), {\n"
+    webhookMethod &= "      status: 200,\n"
+    webhookMethod &= "      headers: corsHeaders,\n"
+    webhookMethod &= "    });\n"
+    webhookMethod &= "  }\n"
+
+    # Insert the method before the final closing brace of the class
+    let lastBrace = baseJs.rfind("}")
+    baseJs = baseJs[0..<lastBrace] & webhookMethod & "}\n"
+
+  result = baseJs
+
 proc generateWranglerToml*(appName: string, secrets: seq[string],
                            hasDO: bool = false): string =
   ## Generate a wrangler.toml configuration file for the Cloudflare Worker.
@@ -643,9 +734,14 @@ proc generateArtifacts*(appName: string, outputDir: string) {.compileTime.} =
   for item in guardRegistry:
     guardedStates.add(item.strVal)
 
+  # Collect webhook paths from the webhook registry
+  var webhookPaths: seq[string] = @[]
+  for item in webhookRegistry:
+    webhookPaths.add(item[0].strVal)
+
   # Generate the JS and TOML — always include DO for Phase 1+
-  let workerJs = generateWorkerJs(secrets, routes, hasDO = true)
-  let durableObjectJs = generateDurableObjectJs(guardedStates = guardedStates)
+  let workerJs = generateWorkerJs(secrets, routes, hasDO = true, webhookPaths = webhookPaths)
+  let durableObjectJs = generateDurableObjectJs(guardedStates = guardedStates, webhookPaths = webhookPaths)
   let combinedJs = workerJs & "\n" & durableObjectJs
   let wranglerToml = generateWranglerToml(appName, secrets, hasDO = true)
 
