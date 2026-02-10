@@ -556,10 +556,6 @@ proc generateSyncJs*(): string =
         }
         return result;
       } catch (err) {
-        if (err._retry) {
-          if (attempt < maxRetries) continue;
-          return { rejected: true, error: err.error };
-        }
         // Network error — events are already in IndexedDB (queued)
         throw { offline: true, queued: true, error: err.message };
       }
@@ -591,10 +587,6 @@ proc generateSyncJs*(): string =
         }
         return result;
       } catch (err) {
-        if (err._retry) {
-          if (attempt < maxRetries) continue;
-          return { rejected: true, error: err.error };
-        }
         throw { offline: true, queued: true, error: err.message };
       }
     }

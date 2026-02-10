@@ -20,7 +20,7 @@ A generated JavaScript module (like `unanimDB`) that sits between the app's prox
 
 ### proxyFetch flow with sync
 
-```
+```text
 App calls proxyFetch("https://api.openai.com/...", {headers, body})
     │
     ▼
@@ -59,8 +59,8 @@ The client tracks which events the server has seen via a single number stored in
 
 Server wins, always. When the server rejects:
 1. Accept server_events as truth (store them in IndexedDB)
-2. Discard conflicting local events (the ones the server rejected)
-3. Retry the proxyFetch with a clean delta
+2. Advance last synced sequence to server's latest (conflicting local events are superseded — they remain in IndexedDB but fall below the sync marker, so they won't be re-sent)
+3. Retry the proxyFetch with a corrected delta
 
 This matches VISION.md: "the server is always authoritative."
 
@@ -175,7 +175,7 @@ A script measures `gzip -c <artifact> | wc -c` and compares against budgets. War
 
 ### Dependency order
 
-```
+```text
 F (spec update)
 ├─ A (client sync layer)     ─┐
 ├─ B (DO bidirectional + sync) ├─ C (Todo app) ─── D (CI budgets)
