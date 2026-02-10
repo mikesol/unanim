@@ -428,4 +428,14 @@ block testWorkerRoutesProxy:
 
 echo "test_codegen: Task 28 passed."
 
+# --- Task 29: DO /proxy returns bidirectional server_events ---
+block testDurableObjectProxyBidirectionalEvents:
+  let js = generateDurableObjectJs()
+  doAssert "getServerEventsSince" in js,
+    "DO should have helper to get server events since a sequence"
+  doAssert "server_events: []" notin js,
+    "DO /proxy should NOT hardcode server_events to empty array"
+
+echo "test_codegen: Task 29 passed."
+
 echo "All codegen tests passed."
