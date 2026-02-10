@@ -319,6 +319,13 @@ export class UserDO {
     const body = await request.json();
     const { events_since, events, request: apiRequest } = body;
 
+    if (!apiRequest || !apiRequest.url) {
+      return new Response(JSON.stringify({ error: "Missing 'request.url' in proxy body." }), {
+        status: 400,
+        headers: corsHeaders,
+      });
+    }
+
     // Determine expected next sequence from stored events
     let expectedNextSeq = 1;
     if (events_since && events_since > 0) {
