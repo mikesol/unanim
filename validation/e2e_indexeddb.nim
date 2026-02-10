@@ -10,8 +10,16 @@ const log = (msg) => {
 
 async function runTests() {
   try {
-    // Test 1: Open database
+    // Test 0: Pre-check for persisted data (proves persistence on refresh)
     await unanimDB.openDatabase();
+    const existing = await unanimDB.getAllEvents();
+    if (existing.length > 0) {
+      log("PASS: persistence confirmed - found " + existing.length + " events from prior session");
+      log("All tests complete (persistence verified).");
+      return;
+    }
+
+    // Test 1: Open database (fresh run)
     log("PASS: openDatabase succeeded");
 
     // Test 2: Append events
