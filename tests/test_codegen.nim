@@ -233,10 +233,11 @@ block testDurableObjectSqliteTable:
     "Events table should have schema_version column"
   doAssert "payload TEXT" in js,
     "Events table should have payload column"
-  doAssert "state_hash_after TEXT" in js,
-    "Events table should have state_hash_after column"
-  doAssert "parent_hash TEXT" in js,
-    "Events table should have parent_hash column"
+  # Spec-change #21: removed state_hash_after and parent_hash columns
+  doAssert "state_hash_after" notin js,
+    "Events table should NOT have state_hash_after column (spec-change #21)"
+  doAssert "parent_hash" notin js,
+    "Events table should NOT have parent_hash column (spec-change #21)"
 
 echo "test_codegen: Task 13 passed."
 
@@ -368,27 +369,27 @@ block testCombinedEjectability:
 
 echo "test_codegen: Task 23 passed."
 
-# --- Task 24: DO has SHA-256 hashing via Web Crypto API ---
-block testDurableObjectHashing:
+# --- Task 24: DO has NO hash functions (spec-change #21) ---
+block testDurableObjectNoHashing:
   let js = generateDurableObjectJs()
-  doAssert "crypto.subtle.digest" in js,
-    "DO should use Web Crypto API for SHA-256"
-  doAssert "canonicalForm" in js,
-    "DO should have canonicalForm function"
-  doAssert "hashEvent" in js,
-    "DO should have hashEvent function"
-  doAssert "computeStateHash" in js,
-    "DO should have computeStateHash function (zeros state_hash_after before hashing)"
+  doAssert "crypto.subtle.digest" notin js,
+    "DO should NOT use Web Crypto API for SHA-256 (spec-change #21)"
+  doAssert "canonicalForm" notin js,
+    "DO should NOT have canonicalForm function (spec-change #21)"
+  doAssert "hashEvent" notin js,
+    "DO should NOT have hashEvent function (spec-change #21)"
+  doAssert "computeStateHash" notin js,
+    "DO should NOT have computeStateHash function (spec-change #21)"
 
 echo "test_codegen: Task 24 passed."
 
-# --- Task 25: DO has hash chain verification ---
-block testDurableObjectVerification:
+# --- Task 25: DO has sequence continuity verification (not hash chain) ---
+block testDurableObjectSequenceVerification:
   let js = generateDurableObjectJs()
-  doAssert "verifyChain" in js,
-    "DO should have verifyChain method"
-  doAssert "parent_hash" in js,
-    "DO verification should check parent_hash linkage"
+  doAssert "parent_hash" notin js,
+    "DO should NOT check parent_hash (spec-change #21)"
+  doAssert "state_hash_after" notin js,
+    "DO should NOT check state_hash_after (spec-change #21)"
 
 echo "test_codegen: Task 25 passed."
 
@@ -403,8 +404,9 @@ block testDurableObjectProxyEndpoint:
     "DO proxy response should include events_accepted"
   doAssert "server_events" in js,
     "DO proxy response should include server_events"
-  doAssert "verifyChain" in js,
-    "DO proxy should call verifyChain"
+  # Spec-change #21: proxy uses inline sequence checking, not verifyChain
+  doAssert "sequence" in js,
+    "DO proxy should check sequence continuity"
 
 echo "test_codegen: Task 26 passed."
 
