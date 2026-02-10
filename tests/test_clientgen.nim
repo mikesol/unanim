@@ -347,8 +347,21 @@ block testSyncJsHandles409:
     "Sync JS should check events_accepted field"
   doAssert "server_events" in js,
     "Sync JS should handle server_events in response"
+  doAssert "reconcile409" in js,
+    "Sync JS should have reconcile409 function"
 
 echo "test_clientgen: Task 12c passed."
+
+block testSyncJsRetryOn409:
+  let js = generateSyncJs()
+  doAssert "_retry" in js,
+    "Sync JS should use _retry flag for 409 retry logic"
+  doAssert "maxRetries" in js,
+    "Sync JS should have retry limit for 409 reconciliation"
+  doAssert "attempt" in js,
+    "Sync JS should track retry attempts"
+
+echo "test_clientgen: Task 12c2 passed."
 
 block testSyncJsOfflineHandling:
   let js = generateSyncJs()

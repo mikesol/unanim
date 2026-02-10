@@ -474,6 +474,17 @@ proc generateSyncJs*(): string =
     });
   }
 
+  async function reconcile409(data) {
+    // Server rejected our events — accept server state as authoritative
+    if (data.server_events && data.server_events.length > 0) {
+      await unanimDB.appendEvents(data.server_events);
+    }
+    const latest = await unanimDB.getLatestEvent();
+    if (latest) {
+      await setLastSyncedSequence(latest.sequence);
+    }
+  }
+
   async function processResponse(response, isProxy) {
     if (!response.ok && response.status !== 409) {
       throw new Error("Sync request failed: " + response.status);
@@ -493,80 +504,99 @@ proc generateSyncJs*(): string =
       return isProxy ? data.response : data;
     }
 
-    // 409: server rejected our events
+    // 409: server rejected — reconcile and signal retry needed
     if (response.status === 409) {
-      // Store server events (server is authoritative)
-      if (data.server_events && data.server_events.length > 0) {
-        await unanimDB.appendEvents(data.server_events);
-      }
-      // Update sync sequence to server's latest
-      const latest = await unanimDB.getLatestEvent();
-      if (latest) {
-        await setLastSyncedSequence(latest.sequence);
-      }
-      // Return rejection info so caller can decide what to do
-      return { rejected: true, error: data.error, server_events: data.server_events };
+      await reconcile409(data);
+      return { _retry: true, error: data.error };
     }
 
     return isProxy ? data.response : data;
   }
 
+  async function doFetch(endpoint, body, userId) {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-User-Id": userId
+      },
+      body: JSON.stringify(body)
+    });
+    return response;
+  }
+
   async function proxyFetch(workerUrl, url, options) {
     options = options || {};
     const userId = options.userId || "default-user";
-    const lastSeq = await getLastSyncedSequence();
-    const events = await unanimDB.getEventsSince(lastSeq);
+    const maxRetries = 1;
 
-    const body = {
-      events_since: lastSeq,
-      events: events,
-      request: {
-        url: url,
-        headers: options.headers || {},
-        method: options.method || "POST",
-        body: options.body || ""
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const lastSeq = await getLastSyncedSequence();
+      const events = await unanimDB.getEventsSince(lastSeq);
+
+      const body = {
+        events_since: lastSeq,
+        events: events,
+        request: {
+          url: url,
+          headers: options.headers || {},
+          method: options.method || "POST",
+          body: options.body || ""
+        }
+      };
+
+      try {
+        const response = await doFetch(workerUrl + "/do/proxy", body, userId);
+        const result = await processResponse(response, true);
+        if (result && result._retry && attempt < maxRetries) {
+          continue;
+        }
+        if (result && result._retry) {
+          return { rejected: true, error: result.error };
+        }
+        return result;
+      } catch (err) {
+        if (err._retry) {
+          if (attempt < maxRetries) continue;
+          return { rejected: true, error: err.error };
+        }
+        // Network error — events are already in IndexedDB (queued)
+        throw { offline: true, queued: true, error: err.message };
       }
-    };
-
-    try {
-      const response = await fetch(workerUrl + "/do/proxy", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-User-Id": userId
-        },
-        body: JSON.stringify(body)
-      });
-      return await processResponse(response, true);
-    } catch (err) {
-      // Network error — events are already in IndexedDB (queued)
-      throw { offline: true, queued: true, error: err.message };
     }
   }
 
   async function sync(workerUrl, options) {
     options = options || {};
     const userId = options.userId || "default-user";
-    const lastSeq = await getLastSyncedSequence();
-    const events = await unanimDB.getEventsSince(lastSeq);
+    const maxRetries = 1;
 
-    const body = {
-      events_since: lastSeq,
-      events: events
-    };
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const lastSeq = await getLastSyncedSequence();
+      const events = await unanimDB.getEventsSince(lastSeq);
 
-    try {
-      const response = await fetch(workerUrl + "/do/sync", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-User-Id": userId
-        },
-        body: JSON.stringify(body)
-      });
-      return await processResponse(response, false);
-    } catch (err) {
-      throw { offline: true, queued: true, error: err.message };
+      const body = {
+        events_since: lastSeq,
+        events: events
+      };
+
+      try {
+        const response = await doFetch(workerUrl + "/do/sync", body, userId);
+        const result = await processResponse(response, false);
+        if (result && result._retry && attempt < maxRetries) {
+          continue;
+        }
+        if (result && result._retry) {
+          return { rejected: true, error: result.error };
+        }
+        return result;
+      } catch (err) {
+        if (err._retry) {
+          if (attempt < maxRetries) continue;
+          return { rejected: true, error: err.error };
+        }
+        throw { offline: true, queued: true, error: err.message };
+      }
     }
   }
 
