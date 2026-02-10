@@ -303,3 +303,15 @@ block testHtmlShellWithoutIndexedDB:
     "HTML shell should NOT include IndexedDB wrapper by default"
 
 echo "test_clientgen: Task 10b passed."
+
+# --- Task 11: generateSyncJs basic structure ---
+block testGenerateSyncJsBasic:
+  let js = generateSyncJs()
+  doAssert "unanimSync" in js,
+    "Sync JS should define unanimSync global"
+  doAssert "proxyFetch" in js,
+    "Sync JS should have proxyFetch function"
+  doAssert "sync" in js,
+    "Sync JS should have sync function"
+
+echo "test_clientgen: Task 11 passed."
