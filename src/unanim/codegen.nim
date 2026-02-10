@@ -243,6 +243,8 @@ export class UserDO {
         return await this.getStatus(corsHeaders);
       } else if (path === "/proxy" && request.method === "POST") {
         return await this.handleProxy(request, corsHeaders);
+      } else if (path === "/sync" && request.method === "POST") {
+        return await this.handleSync(request, corsHeaders);
       } else {
         return new Response(JSON.stringify({ error: "Not found" }), {
           status: 404,
@@ -459,6 +461,93 @@ export class UserDO {
         headers: corsHeaders,
       });
     }
+  }
+
+  async handleSync(request, corsHeaders) {
+    const body = await request.json();
+    const { events_since, events } = body;
+
+    // Determine expected next sequence from stored events
+    let expectedNextSeq = 1;
+    if (events_since && events_since > 0) {
+      expectedNextSeq = events_since + 1;
+    } else {
+      const lastRow = this.sql.exec(
+        `SELECT MAX(sequence) as latest FROM events`
+      ).one();
+      if (lastRow.latest) {
+        expectedNextSeq = lastRow.latest + 1;
+      }
+    }
+
+    // Verify and store incoming events (sequence continuity check)
+    if (events && events.length > 0) {
+      if (events[0].sequence !== expectedNextSeq) {
+        const sinceSeq = events_since || 0;
+        const serverRows = this.sql.exec(
+          `SELECT sequence, timestamp, event_type, schema_version, payload FROM events WHERE sequence > ? ORDER BY sequence ASC`,
+          sinceSeq
+        ).toArray();
+
+        return new Response(JSON.stringify({
+          events_accepted: false,
+          error: `Sequence gap: expected ${expectedNextSeq}, got ${events[0].sequence}`,
+          server_events: serverRows,
+          response: null,
+        }), {
+          status: 409,
+          headers: corsHeaders,
+        });
+      }
+
+      // Verify internal sequence continuity
+      for (let i = 1; i < events.length; i++) {
+        if (events[i].sequence !== events[i - 1].sequence + 1) {
+          return new Response(JSON.stringify({
+            events_accepted: false,
+            error: `Sequence gap at event ${i}: expected ${events[i - 1].sequence + 1}, got ${events[i].sequence}`,
+            server_events: this.getServerEventsSince(events_since || 0, new Set()),
+            response: null,
+          }), {
+            status: 409,
+            headers: corsHeaders,
+          });
+        }
+      }
+
+      // Store verified events
+      for (const event of events) {
+        this.sql.exec(
+          `INSERT INTO events (sequence, timestamp, event_type, schema_version, payload) VALUES (?, ?, ?, ?, ?)`,
+          event.sequence,
+          event.timestamp,
+          event.event_type,
+          event.schema_version,
+          event.payload
+        );
+      }
+    }
+
+    // Collect client event sequences for filtering
+    const clientSequences = new Set();
+    if (events && events.length > 0) {
+      for (const event of events) {
+        clientSequences.add(event.sequence);
+      }
+    }
+
+    // Get events the client hasn't seen
+    const sinceSeq = events_since || 0;
+    const serverEvents = this.getServerEventsSince(sinceSeq, clientSequences);
+
+    return new Response(JSON.stringify({
+      events_accepted: true,
+      server_events: serverEvents,
+      response: null,
+    }), {
+      status: 200,
+      headers: corsHeaders,
+    });
   }
 }
 """
