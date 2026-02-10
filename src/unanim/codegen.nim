@@ -13,6 +13,7 @@ import ./secret
 import ./proxyfetch
 import ./cron
 import ./after
+import ./webhook
 
 type
   SecretBinding* = object
@@ -30,6 +31,7 @@ proc sanitizeEnvVar*(name: string): string =
 
 proc generateWorkerJs*(secrets: seq[string], routes: seq[RouteInfo],
                        hasDO: bool = false,
+                       webhookPaths: seq[string] = @[],
                        cronSchedules: seq[string] = @[]): string =
   ## Generate a standalone Cloudflare Worker JS file (ES modules format).
   ## The Worker:
@@ -67,11 +69,26 @@ proc generateWorkerJs*(secrets: seq[string], routes: seq[RouteInfo],
   result &= "      });\n"
   result &= "    }\n"
 
-  # Section 3: DO routing (only when hasDO is true)
+  # Section 3a: Webhook routing (only when webhookPaths is non-empty)
+  if webhookPaths.len > 0:
+    result &= "\n"
+    result &= "    // Route webhook endpoints to Durable Objects\n"
+    result &= "    const reqUrl = new URL(request.url);\n"
+    result &= "    if (reqUrl.pathname.startsWith(\"/webhook/\")) {\n"
+    result &= "      // Webhook requests don't require X-User-Id — they come from external services\n"
+    result &= "      // Route to a system-level DO for webhook processing\n"
+    result &= "      const doId = env.USER_DO.idFromName(\"__webhook__\");\n"
+    result &= "      const doStub = env.USER_DO.get(doId);\n"
+    result &= "      return doStub.fetch(new Request(request.url, request));\n"
+    result &= "    }\n"
+
+  # Section 3b: DO routing (only when hasDO is true)
   if hasDO:
     result &= "\n"
     result &= "    // Route /do/* requests to Durable Objects\n"
-    result &= "    const reqUrl = new URL(request.url);\n"
+    if webhookPaths.len == 0:
+      # reqUrl not yet declared (no webhook block above)
+      result &= "    const reqUrl = new URL(request.url);\n"
     result &= "    if (reqUrl.pathname.startsWith(\"/do/\")) {\n"
     result &= "      const userId = request.headers.get(\"X-User-Id\") || reqUrl.searchParams.get(\"user_id\");\n"
     result &= "      if (!userId) {\n"
@@ -193,7 +210,8 @@ proc generateWorkerJs*(secrets: seq[string], routes: seq[RouteInfo],
 
   result &= "};\n"
 
-proc generateDurableObjectJs*(hasCron: bool = false, hasAfter: bool = false): string =
+proc generateDurableObjectJs*(webhookPaths: seq[string] = @[],
+                              hasCron: bool = false, hasAfter: bool = false): string =
   ## Generate a Durable Object ES module class with SQLite event storage.
   ## The DO:
   ## - Creates an events table in SQLite on initialization
@@ -202,6 +220,7 @@ proc generateDurableObjectJs*(hasCron: bool = false, hasAfter: bool = false): st
   ## - Reports status via GET /status
   ## - Verifies sequence continuity at /proxy boundary
   ## - Handles CORS preflight
+  ## - When webhookPaths is non-empty, handles incoming webhook requests
   ## - When hasCron: handles /cron route for scheduled execution
   ## - When hasAfter: handles DO Alarms for delayed execution
   ##
@@ -279,6 +298,11 @@ proc generateDurableObjectJs*(hasCron: bool = false, hasAfter: bool = false): st
   if hasAfter:
     result &= "      } else if (path === \"/schedule-alarm\" && request.method === \"POST\") {\n"
     result &= "        return await this.handleScheduleAlarm(request, corsHeaders);\n"
+
+  # Conditional webhook route
+  if webhookPaths.len > 0:
+    result &= "      } else if (path.startsWith(\"/webhook/\")) {\n"
+    result &= "        return await this.handleWebhook(request, path, corsHeaders);\n"
 
   result &= "      } else {\n"
   result &= "        return new Response(JSON.stringify({ error: \"Not found\" }), {\n"
@@ -617,6 +641,63 @@ proc generateDurableObjectJs*(hasCron: bool = false, hasAfter: bool = false): st
     result &= "    });\n"
     result &= "  }\n"
 
+  # Section 14: handleWebhook (conditional)
+  if webhookPaths.len > 0:
+    result &= "\n"
+    result &= "  async handleWebhook(request, path, corsHeaders) {\n"
+    result &= "    // SCAFFOLD(phase4, #37): Signature verification goes here\n"
+    result &= "    // Each webhook path would have its own verification logic\n"
+    result &= "    // (e.g., Stripe uses HMAC-SHA256, Clerk uses Svix, etc.)\n"
+    result &= "\n"
+    result &= "    if (request.method !== \"POST\") {\n"
+    result &= "      return new Response(JSON.stringify({ error: \"Webhooks only accept POST requests\" }), {\n"
+    result &= "        status: 405,\n"
+    result &= "        headers: corsHeaders,\n"
+    result &= "      });\n"
+    result &= "    }\n"
+    result &= "\n"
+    result &= "    let payload;\n"
+    result &= "    try {\n"
+    result &= "      payload = await request.json();\n"
+    result &= "    } catch (e) {\n"
+    result &= "      return new Response(JSON.stringify({ error: \"Invalid JSON payload\" }), {\n"
+    result &= "        status: 400,\n"
+    result &= "        headers: corsHeaders,\n"
+    result &= "      });\n"
+    result &= "    }\n"
+    result &= "\n"
+    result &= "    // Get next sequence number\n"
+    result &= "    const lastRow = this.sql.exec(`SELECT MAX(sequence) as latest FROM events`).one();\n"
+    result &= "    const nextSeq = (lastRow.latest || 0) + 1;\n"
+    result &= "\n"
+    result &= "    // Store webhook_result event\n"
+    result &= "    const event = {\n"
+    result &= "      sequence: nextSeq,\n"
+    result &= "      timestamp: new Date().toISOString(),\n"
+    result &= "      event_type: \"webhook_result\",\n"
+    result &= "      schema_version: 1,\n"
+    result &= "      payload: JSON.stringify({ webhook_path: path, data: payload }),\n"
+    result &= "    };\n"
+    result &= "\n"
+    result &= "    this.sql.exec(\n"
+    result &= "      `INSERT INTO events (sequence, timestamp, event_type, schema_version, payload) VALUES (?, ?, ?, ?, ?)`,\n"
+    result &= "      event.sequence,\n"
+    result &= "      event.timestamp,\n"
+    result &= "      event.event_type,\n"
+    result &= "      event.schema_version,\n"
+    result &= "      event.payload\n"
+    result &= "    );\n"
+    result &= "\n"
+    result &= "    return new Response(JSON.stringify({\n"
+    result &= "      received: true,\n"
+    result &= "      sequence: event.sequence,\n"
+    result &= "      webhook_path: path,\n"
+    result &= "    }), {\n"
+    result &= "      status: 200,\n"
+    result &= "      headers: corsHeaders,\n"
+    result &= "    });\n"
+    result &= "  }\n"
+
   # Close the class
   result &= "}\n"
 
@@ -706,6 +787,11 @@ proc generateArtifacts*(appName: string, outputDir: string) {.compileTime.} =
       ))
       inc routeIndex
 
+  # Collect webhook paths from the webhook registry
+  var webhookPaths: seq[string] = @[]
+  for item in webhookRegistry:
+    webhookPaths.add(item[0].strVal)
+
   # Collect cron schedules from the cron registry
   var cronSchedules: seq[string] = @[]
   for item in cronRegistry:
@@ -717,8 +803,10 @@ proc generateArtifacts*(appName: string, outputDir: string) {.compileTime.} =
 
   # Generate the JS and TOML — always include DO for Phase 1+
   let workerJs = generateWorkerJs(secrets, routes, hasDO = true,
+                                   webhookPaths = webhookPaths,
                                    cronSchedules = cronSchedules)
-  let durableObjectJs = generateDurableObjectJs(hasCron = hasCronHandlers,
+  let durableObjectJs = generateDurableObjectJs(webhookPaths = webhookPaths,
+                                                 hasCron = hasCronHandlers,
                                                  hasAfter = hasAfterHandlers)
   let combinedJs = workerJs & "\n" & durableObjectJs
   let wranglerToml = generateWranglerToml(appName, secrets, hasDO = true,
