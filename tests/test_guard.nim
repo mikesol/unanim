@@ -150,7 +150,7 @@ block testCombinedGuardNodeCheck:
   if whichExitCode != 0:
     echo "test_guard: Task 12 skipped (node not found on PATH)."
   else:
-    let workerJs = generateWorkerJs(@[], @[], hasDO = true, guardedStates = @["credits"])
+    let workerJs = generateWorkerJs(@[], @[], hasDO = true)
     let doJs = generateDurableObjectJs(guardedStates = @["credits"])
     let combined = workerJs & "\n" & doJs
     let tmpDir = "/tmp/unanim_guard_test"

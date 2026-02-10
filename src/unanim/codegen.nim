@@ -28,8 +28,7 @@ proc sanitizeEnvVar*(name: string): string =
   result = name.toUpperAscii().replace("-", "_").replace(".", "_")
 
 proc generateWorkerJs*(secrets: seq[string], routes: seq[RouteInfo],
-                       hasDO: bool = false,
-                       guardedStates: seq[string] = @[]): string =
+                       hasDO: bool = false): string =
   ## Generate a standalone Cloudflare Worker JS file (ES modules format).
   ## The Worker:
   ## - Accepts POST requests with JSON body containing target URL and headers
@@ -645,7 +644,7 @@ proc generateArtifacts*(appName: string, outputDir: string) {.compileTime.} =
     guardedStates.add(item.strVal)
 
   # Generate the JS and TOML — always include DO for Phase 1+
-  let workerJs = generateWorkerJs(secrets, routes, hasDO = true, guardedStates = guardedStates)
+  let workerJs = generateWorkerJs(secrets, routes, hasDO = true)
   let durableObjectJs = generateDurableObjectJs(guardedStates = guardedStates)
   let combinedJs = workerJs & "\n" & durableObjectJs
   let wranglerToml = generateWranglerToml(appName, secrets, hasDO = true)
