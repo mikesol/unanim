@@ -40,7 +40,7 @@ let failed = 0;
 const timings = {};
 
 const log = (msg) => {
-  document.getElementById("output").textContent += msg + "\\n";
+  document.getElementById("output").textContent += msg + "\n";
   console.log(msg);
 };
 
