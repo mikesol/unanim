@@ -496,16 +496,19 @@ echo "test_codegen: Task 33 passed."
 import std/osproc
 
 block testDurableObjectJsNodeCheck:
-  let js = generateDurableObjectJs()
-  let tmpDir = "/tmp/unanim_do_sync_test"
-  createDir(tmpDir)
-  let jsFile = tmpDir & "/do_test.js"
-  writeFile(jsFile, js)
-  let (output, exitCode) = execCmdEx("node --check " & jsFile)
-  doAssert exitCode == 0,
-    "generateDurableObjectJs output must pass node --check. Errors: " & output
-
-echo "test_codegen: Task 34 passed (node --check verified)."
+  let (_, whichExitCode) = execCmdEx("which node")
+  if whichExitCode != 0:
+    echo "test_codegen: Task 34 skipped (node not found on PATH)."
+  else:
+    let js = generateDurableObjectJs()
+    let tmpDir = "/tmp/unanim_do_sync_test"
+    createDir(tmpDir)
+    let jsFile = tmpDir & "/do_test.js"
+    writeFile(jsFile, js)
+    let (output, exitCode) = execCmdEx("node --check " & jsFile)
+    doAssert exitCode == 0,
+      "generateDurableObjectJs output must pass node --check. Errors: " & output
+    echo "test_codegen: Task 34 passed (node --check verified)."
 
 # --- Task 35: verifyAndStoreEvents shared helper ---
 block testVerifyAndStoreEventsSharedHelper:
