@@ -580,13 +580,17 @@ proc generateSyncJs*(): string =
 """
 
 proc generateHtmlShell*(scriptFile: string, title: string = "App",
-                        includeIndexedDB: bool = false): string =
+                        includeIndexedDB: bool = false,
+                        includeSync: bool = false): string =
   ## Generate a minimal standalone HTML shell that loads the compiled JS.
   ## SCAFFOLD(Phase 1, #5): This is a minimal scaffold. Will be replaced
   ## by the islands DSL in later phases.
   var indexedDBScript = ""
   if includeIndexedDB:
     indexedDBScript = "  <script>\n" & generateIndexedDBJs() & "  </script>\n"
+  var syncScript = ""
+  if includeSync:
+    syncScript = "  <script>\n" & generateSyncJs() & "  </script>\n"
   result = "<!DOCTYPE html>\n" &
     "<html>\n" &
     "<head>\n" &
@@ -595,6 +599,7 @@ proc generateHtmlShell*(scriptFile: string, title: string = "App",
     "</head>\n" &
     "<body>\n" &
     indexedDBScript &
+    syncScript &
     "  <script src=\"" & scriptFile & "\"></script>\n" &
     "</body>\n" &
     "</html>\n"

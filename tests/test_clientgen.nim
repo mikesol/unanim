@@ -383,3 +383,35 @@ block testSyncJsUserId:
     "Sync JS should send X-User-Id header for DO routing"
 
 echo "test_clientgen: Task 12g passed."
+
+# --- Task 13: HTML shell includes sync JS ---
+block testHtmlShellIncludesSync:
+  let html = generateHtmlShell("app.js", includeIndexedDB = true, includeSync = true)
+  doAssert "unanimSync" in html,
+    "HTML shell should include sync JS when includeSync=true"
+  doAssert "unanimDB" in html,
+    "HTML shell should include IndexedDB JS when includeIndexedDB=true"
+  # unanimDB must come before unanimSync (dependency order)
+  let dbPos = html.find("unanimDB")
+  let syncPos = html.find("unanimSync")
+  doAssert dbPos < syncPos,
+    "unanimDB must be loaded before unanimSync"
+
+echo "test_clientgen: Task 13a passed."
+
+block testHtmlShellWithoutSync:
+  let html = generateHtmlShell("app.js", includeIndexedDB = true)
+  doAssert "unanimSync" notin html,
+    "HTML shell should NOT include sync JS by default"
+
+echo "test_clientgen: Task 13b passed."
+
+block testHtmlShellSyncRequiresIndexedDB:
+  # If includeSync=true but includeIndexedDB=false, sync JS should
+  # still be included (but unanimDB won't be — it's the caller's
+  # responsibility to ensure unanimDB is available)
+  let html = generateHtmlShell("app.js", includeSync = true)
+  doAssert "unanimSync" in html,
+    "HTML shell should include sync JS when requested"
+
+echo "test_clientgen: Task 13c passed."
