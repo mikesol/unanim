@@ -11,6 +11,7 @@ import std/macrocache
 import std/strutils
 import ./secret
 import ./proxyfetch
+import ./guard
 import ./webhook
 
 type
@@ -194,7 +195,8 @@ proc generateWorkerJs*(secrets: seq[string], routes: seq[RouteInfo],
   result &= "  },\n"
   result &= "};\n"
 
-proc generateDurableObjectJs*(webhookPaths: seq[string] = @[]): string =
+proc generateDurableObjectJs*(guardedStates: seq[string] = @[],
+                              webhookPaths: seq[string] = @[]): string =
   ## Generate a Durable Object ES module class with SQLite event storage.
   ## The DO:
   ## - Creates an events table in SQLite on initialization
@@ -203,9 +205,19 @@ proc generateDurableObjectJs*(webhookPaths: seq[string] = @[]): string =
   ## - Reports status via GET /status
   ## - Verifies sequence continuity at /proxy boundary
   ## - Handles CORS preflight
+  ## - Rejects client-submitted proxy_minted events (guard enforcement)
+  ## - Provides mintProxyEvent for server-side event generation
   ## - When webhookPaths is non-empty, handles incoming webhook requests
   ##
   ## See VISION.md Section 4.2 (The Event Log)
+
+  # Build the guarded states JS array literal
+  var guardedStatesJs = "["
+  for i, s in guardedStates:
+    if i > 0: guardedStatesJs &= ", "
+    guardedStatesJs &= "\"" & s & "\""
+  guardedStatesJs &= "]"
+
   var baseJs = """// Unanim Generated Durable Object
 // Event storage backed by SQLite via Cloudflare Durable Objects.
 // This class is standalone — copy to a fresh Cloudflare project and it works.
@@ -215,6 +227,7 @@ export class UserDO {
     this.state = state;
     this.env = env;
     this.sql = state.storage.sql;
+    this.guardedStates = """ & guardedStatesJs & """;
     this.state.blockConcurrencyWhile(async () => {
       await this.initialize();
     });
@@ -277,9 +290,30 @@ export class UserDO {
     }
   }
 
+  rejectClientProxyMinted(events) {
+    // Guard enforcement: clients cannot submit proxy_minted events.
+    // Only the DO itself (via mintProxyEvent) can create proxy_minted events.
+    if (!events || events.length === 0) return null;
+    for (const event of events) {
+      if (event.event_type === "proxy_minted") {
+        return "Client cannot submit proxy_minted events. Only the server can mint these events.";
+      }
+    }
+    return null;
+  }
+
   async storeEvents(request, corsHeaders) {
     const body = await request.json();
     const events = Array.isArray(body) ? body : [body];
+
+    // Guard enforcement: reject client-submitted proxy_minted events
+    const guardError = this.rejectClientProxyMinted(events);
+    if (guardError) {
+      return new Response(JSON.stringify({ error: guardError }), {
+        status: 403,
+        headers: corsHeaders,
+      });
+    }
 
     for (const event of events) {
       this.sql.exec(
@@ -343,7 +377,46 @@ export class UserDO {
     });
   }
 
+  mintProxyEvent(payload) {
+    // SCAFFOLD(phase4, #36): Server-side proxy event minting.
+    // Only the DO itself can call this method to create proxy_minted events.
+    // This is the mechanism for guarded state increases (e.g., crediting after API call).
+    const lastRow = this.sql.exec(
+      `SELECT MAX(sequence) as latest FROM events`
+    ).one();
+    const nextSeq = (lastRow.latest || 0) + 1;
+    const event = {
+      sequence: nextSeq,
+      timestamp: new Date().toISOString(),
+      event_type: "proxy_minted",
+      schema_version: 1,
+      payload: typeof payload === "string" ? payload : JSON.stringify(payload),
+    };
+    this.sql.exec(
+      `INSERT INTO events (sequence, timestamp, event_type, schema_version, payload) VALUES (?, ?, ?, ?, ?)`,
+      event.sequence,
+      event.timestamp,
+      event.event_type,
+      event.schema_version,
+      event.payload
+    );
+    return event;
+  }
+
   async verifyAndStoreEvents(events_since, events, corsHeaders) {
+    // Guard enforcement: reject client-submitted proxy_minted events
+    const guardError = this.rejectClientProxyMinted(events);
+    if (guardError) {
+      return { error: new Response(JSON.stringify({
+        events_accepted: false,
+        error: guardError,
+        response: null,
+      }), {
+        status: 403,
+        headers: corsHeaders,
+      }) };
+    }
+
     // Determine expected next sequence from stored events
     let expectedNextSeq = 1;
     if (events_since && events_since > 0) {
@@ -656,6 +729,11 @@ proc generateArtifacts*(appName: string, outputDir: string) {.compileTime.} =
       ))
       inc routeIndex
 
+  # Collect guarded states from the guard registry
+  var guardedStates: seq[string] = @[]
+  for item in guardRegistry:
+    guardedStates.add(item.strVal)
+
   # Collect webhook paths from the webhook registry
   var webhookPaths: seq[string] = @[]
   for item in webhookRegistry:
@@ -663,7 +741,7 @@ proc generateArtifacts*(appName: string, outputDir: string) {.compileTime.} =
 
   # Generate the JS and TOML — always include DO for Phase 1+
   let workerJs = generateWorkerJs(secrets, routes, hasDO = true, webhookPaths = webhookPaths)
-  let durableObjectJs = generateDurableObjectJs(webhookPaths = webhookPaths)
+  let durableObjectJs = generateDurableObjectJs(guardedStates = guardedStates, webhookPaths = webhookPaths)
   let combinedJs = workerJs & "\n" & durableObjectJs
   let wranglerToml = generateWranglerToml(appName, secrets, hasDO = true)
 
