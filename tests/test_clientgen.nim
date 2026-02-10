@@ -415,3 +415,19 @@ block testHtmlShellSyncRequiresIndexedDB:
     "HTML shell should include sync JS when requested"
 
 echo "test_clientgen: Task 13c passed."
+
+# --- Task 14: Node syntax check ---
+import std/os
+import std/osproc
+
+block testSyncJsNodeCheck:
+  let js = generateSyncJs()
+  let tmpDir = "/tmp/unanim_sync_test"
+  createDir(tmpDir)
+  let jsFile = tmpDir & "/sync_test.js"
+  writeFile(jsFile, js)
+  let (output, exitCode) = execCmdEx("node --check " & jsFile)
+  doAssert exitCode == 0,
+    "generateSyncJs output must pass node --check. Errors: " & output
+
+echo "test_clientgen: Task 14 passed (node --check verified)."
