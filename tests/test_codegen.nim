@@ -368,4 +368,16 @@ block testCombinedEjectability:
 
 echo "test_codegen: Task 23 passed."
 
+# --- Task 24: DO has SHA-256 hashing via Web Crypto API ---
+block testDurableObjectHashing:
+  let js = generateDurableObjectJs()
+  doAssert "crypto.subtle.digest" in js,
+    "DO should use Web Crypto API for SHA-256"
+  doAssert "canonicalForm" in js,
+    "DO should have canonicalForm function"
+  doAssert "hashEvent" in js,
+    "DO should have hashEvent function"
+
+echo "test_codegen: Task 24 passed."
+
 echo "All codegen tests passed."

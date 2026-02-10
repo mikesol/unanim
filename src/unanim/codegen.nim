@@ -213,6 +213,32 @@ export class UserDO {
     )`);
   }
 
+  async sha256Hex(input) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(input);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  canonicalForm(event) {
+    return [
+      event.sequence.toString(),
+      event.timestamp,
+      event.event_type,
+      event.schema_version.toString(),
+      event.payload,
+      event.state_hash_after,
+      event.parent_hash,
+    ].join("|");
+  }
+
+  async hashEvent(event) {
+    const forHashing = { ...event, state_hash_after: "" };
+    const canonical = this.canonicalForm(forHashing);
+    return await this.sha256Hex(canonical);
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
     const path = url.pathname;
