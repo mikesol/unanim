@@ -15,9 +15,7 @@ log.append(
   payload = "{\"status\":200}"
 )
 
-echo "Event 1 stateHashAfter: ", log.events[0].stateHashAfter
-echo "hashEvent(event 1):     ", hashEvent(log.events[0])
-echo "Event 2 parentHash:     ", log.events[1].parentHash
-echo "Equal? ", log.events[0].stateHashAfter == log.events[1].parentHash
+echo "Event 1 sequence: ", log.events[0].sequence
+echo "Event 2 sequence: ", log.events[1].sequence
 echo ""
 echo eventsToJson(log.events).pretty

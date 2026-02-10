@@ -2,76 +2,63 @@
 
 **Date:** 2026-02-10
 **Issue:** #15 — Event log verification at proxyFetch boundary
+**Spec-change:** #21 — Removed hash chain, simplified to sequence continuity
 **Worker URL:** https://unanim-e2e-proxy.mike-solomon.workers.dev
 
-## Test Events
-
-Generated via `validation/gen_test_events.nim` using Nim's `eventlog` module (nimcrypto SHA-256).
-
-Event 1:
-```json
-{"sequence":1,"timestamp":"2026-02-10T08:22:57Z","event_type":"user_action","schema_version":1,"payload":"{\"action\":\"click\"}","state_hash_after":"e4ede6386b82cf65e0df9933c57448ff9710728d5f326d452d6c5ca0ef4e94d0","parent_hash":"0000000000000000000000000000000000000000000000000000000000000000"}
-```
-
-Event 2 (chains from event 1):
-```json
-{"sequence":2,"timestamp":"2026-02-10T08:22:57Z","event_type":"api_response","schema_version":1,"payload":"{\"status\":200}","state_hash_after":"58e9921f14fe2632e89380e51061e581441ba79c3d7590f092d8e52a4a0f97b9","parent_hash":"6a1908d86d6db085285ccb068510ca8991798946452a9b5e4f46c6ce2cbd3c86"}
-```
-
-## Test 1: Valid chain — event stored, API forwarded
+## Test 1: Valid event — stored, API forwarded, secret injected
 
 ```bash
 curl -s -X POST "https://unanim-e2e-proxy.mike-solomon.workers.dev/do/proxy" \
   -H "Content-Type: application/json" \
-  -H "X-User-Id: test-user-1" \
-  -d '{"events_since":0,"events":[{"sequence":1,"timestamp":"2026-02-10T08:22:57Z","event_type":"user_action","schema_version":1,"payload":"{\"action\":\"click\"}","state_hash_after":"e4ede6386b82cf65e0df9933c57448ff9710728d5f326d452d6c5ca0ef4e94d0","parent_hash":"0000000000000000000000000000000000000000000000000000000000000000"}],"request":{"url":"https://httpbin.org/post","headers":{"Authorization":"Bearer <<SECRET:test-api-key>>","Content-Type":"application/json"},"method":"POST","body":"hello from proxy verify"}}'
+  -H "X-User-Id: test-seq-v2-user1" \
+  -d '{"events_since":0,"events":[{"sequence":1,"timestamp":"2026-02-10T14:00:00Z","event_type":"user_action","schema_version":1,"payload":"{\"action\":\"click\"}"}],"request":{"url":"https://httpbin.org/post","headers":{"Authorization":"Bearer <<SECRET:test-api-key>>","Content-Type":"application/json"},"method":"POST","body":"hello from simplified proxy"}}'
 ```
 
 **Result:** `events_accepted: true`, httpbin echoed `Authorization: Bearer unanim-test-secret-12345` (secret injected correctly).
 
-## Test 2: Valid chain continuation — event 2 chains from stored event 1
+## Test 2: Chain continuation — event 2 chains from stored event 1
 
 ```bash
 curl -s -X POST "https://unanim-e2e-proxy.mike-solomon.workers.dev/do/proxy" \
   -H "Content-Type: application/json" \
-  -H "X-User-Id: test-user-1" \
-  -d '{"events_since":1,"events":[{"sequence":2,"timestamp":"2026-02-10T08:22:57Z","event_type":"api_response","schema_version":1,"payload":"{\"status\":200}","state_hash_after":"58e9921f14fe2632e89380e51061e581441ba79c3d7590f092d8e52a4a0f97b9","parent_hash":"6a1908d86d6db085285ccb068510ca8991798946452a9b5e4f46c6ce2cbd3c86"}],"request":{"url":"https://httpbin.org/post","headers":{"Content-Type":"application/json"},"method":"POST","body":"event 2 chained"}}'
+  -H "X-User-Id: test-seq-v2-user1" \
+  -d '{"events_since":1,"events":[{"sequence":2,"timestamp":"2026-02-10T14:01:00Z","event_type":"api_response","schema_version":1,"payload":"{\"status\":200}"}],"request":{"url":"https://httpbin.org/post","headers":{"Content-Type":"application/json"},"method":"POST","body":"event 2 chained"}}'
 ```
 
-**Result:** `events_accepted: true`. Anchor hash correctly computed from stored event 1 via `hashEvent(full_event)`.
+**Result:** `events_accepted: true`. Sequence 2 correctly follows stored sequence 1.
 
-## Test 3: Tampered chain (wrong state_hash_after) — rejected with 409
+## Test 3: Sequence gap (wrong sequence) — rejected with 409
 
 ```bash
 curl -s -X POST "https://unanim-e2e-proxy.mike-solomon.workers.dev/do/proxy" \
   -H "Content-Type: application/json" \
-  -H "X-User-Id: test-user-2" \
-  -d '{"events_since":0,"events":[{"sequence":1,"timestamp":"2026-02-10T12:00:00Z","event_type":"user_action","schema_version":1,"payload":"{\"action\":\"click\"}","state_hash_after":"abc123","parent_hash":"0000000000000000000000000000000000000000000000000000000000000000"}],"request":{"url":"https://httpbin.org/post","headers":{},"body":"should not reach"}}'
+  -H "X-User-Id: test-seq-v2-user2" \
+  -d '{"events_since":0,"events":[{"sequence":5,"timestamp":"2026-02-10T14:00:00Z","event_type":"user_action","schema_version":1,"payload":"{\"action\":\"click\"}"}],"request":{"url":"https://httpbin.org/post","headers":{},"body":"should not reach"}}'
 ```
 
-**Result:** `{"events_accepted":false,"error":"Event 1: state_hash_after mismatch. Expected 9d5be2919bea536c..., got abc123...","failed_at":0,"server_events":[],"response":null}` (HTTP 409). API call NOT forwarded.
+**Result:** `{"events_accepted":false,"error":"Sequence gap: expected 1, got 5","server_events":[],"response":null}` (HTTP 409). API call NOT forwarded.
 
-## Test 4: Tampered chain (wrong parent_hash) — rejected with 409
+## Test 4: Duplicate sequence (replay) — rejected with 409, server_events returned
 
 ```bash
 curl -s -X POST "https://unanim-e2e-proxy.mike-solomon.workers.dev/do/proxy" \
   -H "Content-Type: application/json" \
-  -H "X-User-Id: test-user-3" \
-  -d '{"events_since":0,"events":[{"sequence":1,"timestamp":"2026-02-10T12:00:00Z","event_type":"user_action","schema_version":1,"payload":"{\"action\":\"click\"}","state_hash_after":"abc123","parent_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"request":{"url":"https://httpbin.org/post","headers":{},"body":"should not reach"}}'
+  -H "X-User-Id: test-seq-v2-user1" \
+  -d '{"events_since":0,"events":[{"sequence":1,"timestamp":"2026-02-10T14:00:00Z","event_type":"user_action","schema_version":1,"payload":"{\"action\":\"replay\"}"}],"request":{"url":"https://httpbin.org/post","headers":{},"body":"replay attempt"}}'
 ```
 
-**Result:** `{"events_accepted":false,"error":"Event 1: parent_hash mismatch. Expected 0000000000000000..., got aaaaaaaaaaaaaaaa...","failed_at":0,"server_events":[],"response":null}` (HTTP 409).
+**Result:** `{"events_accepted":false,"error":"Sequence gap: expected 3, got 1","server_events":[...2 events...]}` (HTTP 409). Server returns stored events for client reconciliation. API call NOT forwarded.
 
 ## Test 5: Events persisted after valid proxy calls
 
 ```bash
-curl -s "https://unanim-e2e-proxy.mike-solomon.workers.dev/do/events?since=0" -H "X-User-Id: test-user-1"
+curl -s "https://unanim-e2e-proxy.mike-solomon.workers.dev/do/events?since=0" -H "X-User-Id: test-seq-v2-user1"
 ```
 
-**Result:** Both events returned with correct hashes matching Nim-generated values.
+**Result:** Both events returned with correct sequences (1, 2) and 5-field format (no hash fields).
 
 ```bash
-curl -s "https://unanim-e2e-proxy.mike-solomon.workers.dev/do/status" -H "X-User-Id: test-user-1"
+curl -s "https://unanim-e2e-proxy.mike-solomon.workers.dev/do/status" -H "X-User-Id: test-seq-v2-user1"
 ```
 
 **Result:** `{"event_count":2,"latest_sequence":2}`
@@ -79,47 +66,30 @@ curl -s "https://unanim-e2e-proxy.mike-solomon.workers.dev/do/status" -H "X-User
 ## Test 6: User isolation — rejected events not stored
 
 ```bash
-curl -s "https://unanim-e2e-proxy.mike-solomon.workers.dev/do/events?since=0" -H "X-User-Id: test-user-2"
+curl -s "https://unanim-e2e-proxy.mike-solomon.workers.dev/do/events?since=0" -H "X-User-Id: test-seq-v2-user2"
 ```
 
-**Result:** `[]` — tampered events were not stored.
+**Result:** `[]` — events with sequence gaps were not stored.
 
 ## Test 7: Proxy with no events — just API forwarding
 
 ```bash
 curl -s -X POST "https://unanim-e2e-proxy.mike-solomon.workers.dev/do/proxy" \
   -H "Content-Type: application/json" \
-  -H "X-User-Id: test-user-4" \
+  -H "X-User-Id: test-seq-v2-user3" \
   -d '{"events_since":0,"events":[],"request":{"url":"https://httpbin.org/post","headers":{"Authorization":"Bearer <<SECRET:test-api-key>>"},"method":"POST","body":"no events, just proxy"}}'
 ```
 
 **Result:** `events_accepted: true`, httpbin echoed `Authorization: Bearer unanim-test-secret-12345`. Works without events.
 
-## Cross-platform hash compatibility
-
-Verified that the JS Web Crypto API (in Cloudflare DO) produces the same SHA-256 hashes as Nim's nimcrypto library:
-
-- Nim generates events with hashes computed by nimcrypto
-- JS DO verifies those same hashes using Web Crypto API `crypto.subtle.digest("SHA-256", ...)`
-- Both use identical canonical form: `sequence|timestamp|event_type|schema_version|payload|state_hash_after|parent_hash`
-- Event 1 generated by Nim was accepted by JS verification — hashes match cross-platform
-
-## Bug found and fixed
-
-During validation preparation, discovered a hash chain verification bug:
-
-- `hashEvent(event)` was zeroing `state_hash_after` before hashing, but Nim's `hashEvent` hashes the full canonical form (including populated `state_hash_after`)
-- `verifyChain` was using `event.state_hash_after` as the next expected `parent_hash`, but Nim sets `parent_hash = hashEvent(previous)` which is the hash of the FULL event
-- Fix: split into `hashEvent` (hashes as-is) and `computeStateHash` (zeros state_hash_after first); anchor hash computed via `hashEvent(full_event)` not `state_hash_after`
-- Committed as `fix(#15): correct hash chain verification in DO`
-
 ## Summary
 
-All 7 tests passed. The `/proxy` endpoint:
-1. Verifies event hash chain integrity (cross-platform Nim <-> JS)
-2. Rejects tampered events with 409 and structured error
-3. Does NOT forward API calls when chain is invalid
-4. Stores verified events in SQLite
-5. Injects secrets from Worker env into API requests
-6. Works with empty event arrays (pure proxy mode)
-7. Maintains user isolation via Durable Objects
+All 7 tests passed. The `/proxy` endpoint with simplified sequence continuity (spec-change #21):
+1. Verifies event sequence continuity (no gaps, no duplicates)
+2. Rejects sequence gaps with 409 and structured error
+3. Rejects replay/duplicate sequences with 409, returns server_events for reconciliation
+4. Does NOT forward API calls when sequence check fails
+5. Stores verified events in SQLite (5-field format, no hashes)
+6. Injects secrets from Worker env into API requests
+7. Works with empty event arrays (pure proxy mode)
+8. Maintains user isolation via Durable Objects
