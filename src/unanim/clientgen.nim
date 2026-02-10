@@ -410,6 +410,175 @@ proc generateIndexedDBJs*(): string =
 })();
 """
 
+proc generateSyncJs*(): string =
+  ## Generate standalone JavaScript providing sync layer for proxyFetch.
+  ## Returns an IIFE assigned to `const unanimSync` that exposes:
+  ## - proxyFetch(workerUrl, url, options) — sync-aware proxyFetch wrapper
+  ## - sync(workerUrl) — event-only sync (no API call)
+  ##
+  ## Depends on `unanimDB` being loaded first.
+  ## Stores sync metadata (last synced sequence) in a separate IndexedDB object store.
+  result = """const unanimSync = (() => {
+  const SYNC_DB_NAME = "unanim_sync_meta";
+  const SYNC_DB_VERSION = 1;
+  const SYNC_STORE = "meta";
+
+  function openSyncMeta() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(SYNC_DB_NAME, SYNC_DB_VERSION);
+      request.onupgradeneeded = (event) => {
+        const db = event.target.result;
+        if (!db.objectStoreNames.contains(SYNC_STORE)) {
+          db.createObjectStore(SYNC_STORE, { keyPath: "key" });
+        }
+      };
+      request.onsuccess = (event) => resolve(event.target.result);
+      request.onerror = (event) => reject(event.target.error);
+    });
+  }
+
+  function getLastSyncedSequence() {
+    return openSyncMeta().then((db) => {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(SYNC_STORE, "readonly");
+        const store = tx.objectStore(SYNC_STORE);
+        const request = store.get("last_synced_sequence");
+        request.onsuccess = (event) => {
+          db.close();
+          const record = event.target.result;
+          resolve(record ? record.value : 0);
+        };
+        request.onerror = (event) => {
+          db.close();
+          reject(event.target.error);
+        };
+      });
+    });
+  }
+
+  function setLastSyncedSequence(seq) {
+    return openSyncMeta().then((db) => {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(SYNC_STORE, "readwrite");
+        const store = tx.objectStore(SYNC_STORE);
+        store.put({ key: "last_synced_sequence", value: seq });
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = (event) => {
+          db.close();
+          reject(event.target.error);
+        };
+      });
+    });
+  }
+
+  async function processResponse(response, isProxy) {
+    if (!response.ok && response.status !== 409) {
+      throw new Error("Sync request failed: " + response.status);
+    }
+    const data = await response.json();
+
+    if (data.events_accepted) {
+      // Store any server events the client hasn't seen
+      if (data.server_events && data.server_events.length > 0) {
+        await unanimDB.appendEvents(data.server_events);
+      }
+      // Update last synced sequence to highest known
+      const latest = await unanimDB.getLatestEvent();
+      if (latest) {
+        await setLastSyncedSequence(latest.sequence);
+      }
+      return isProxy ? data.response : data;
+    }
+
+    // 409: server rejected our events
+    if (response.status === 409) {
+      // Store server events (server is authoritative)
+      if (data.server_events && data.server_events.length > 0) {
+        await unanimDB.appendEvents(data.server_events);
+      }
+      // Update sync sequence to server's latest
+      const latest = await unanimDB.getLatestEvent();
+      if (latest) {
+        await setLastSyncedSequence(latest.sequence);
+      }
+      // Return rejection info so caller can decide what to do
+      return { rejected: true, error: data.error, server_events: data.server_events };
+    }
+
+    return isProxy ? data.response : data;
+  }
+
+  async function proxyFetch(workerUrl, url, options) {
+    options = options || {};
+    const userId = options.userId || "default-user";
+    const lastSeq = await getLastSyncedSequence();
+    const events = await unanimDB.getEventsSince(lastSeq);
+
+    const body = {
+      events_since: lastSeq,
+      events: events,
+      request: {
+        url: url,
+        headers: options.headers || {},
+        method: options.method || "POST",
+        body: options.body || ""
+      }
+    };
+
+    try {
+      const response = await fetch(workerUrl + "/do/proxy", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-Id": userId
+        },
+        body: JSON.stringify(body)
+      });
+      return await processResponse(response, true);
+    } catch (err) {
+      // Network error — events are already in IndexedDB (queued)
+      throw { offline: true, queued: true, error: err.message };
+    }
+  }
+
+  async function sync(workerUrl, options) {
+    options = options || {};
+    const userId = options.userId || "default-user";
+    const lastSeq = await getLastSyncedSequence();
+    const events = await unanimDB.getEventsSince(lastSeq);
+
+    const body = {
+      events_since: lastSeq,
+      events: events
+    };
+
+    try {
+      const response = await fetch(workerUrl + "/do/sync", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-Id": userId
+        },
+        body: JSON.stringify(body)
+      });
+      return await processResponse(response, false);
+    } catch (err) {
+      throw { offline: true, queued: true, error: err.message };
+    }
+  }
+
+  return {
+    proxyFetch,
+    sync,
+    getLastSyncedSequence,
+    setLastSyncedSequence
+  };
+})();
+"""
+
 proc generateHtmlShell*(scriptFile: string, title: string = "App",
                         includeIndexedDB: bool = false): string =
   ## Generate a minimal standalone HTML shell that loads the compiled JS.
