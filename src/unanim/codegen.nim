@@ -303,6 +303,14 @@ export class UserDO {
     });
   }
 
+  getServerEventsSince(eventsSince, clientSequences) {
+    const rows = this.sql.exec(
+      `SELECT sequence, timestamp, event_type, schema_version, payload FROM events WHERE sequence > ? ORDER BY sequence ASC`,
+      eventsSince
+    ).toArray();
+    return rows.filter(row => !clientSequences.has(row.sequence));
+  }
+
   injectSecrets(value) {
     if (typeof value !== "string") return value;
     return value.replace(/<<SECRET:([^>]+)>>/g, (match, secretName) => {
@@ -365,7 +373,7 @@ export class UserDO {
           return new Response(JSON.stringify({
             events_accepted: false,
             error: `Sequence gap at event ${i}: expected ${events[i - 1].sequence + 1}, got ${events[i].sequence}`,
-            server_events: [],
+            server_events: this.getServerEventsSince(events_since || 0, new Set()),
             response: null,
           }), {
             status: 409,
@@ -386,6 +394,18 @@ export class UserDO {
         );
       }
     }
+
+    // Collect client event sequences for filtering
+    const clientSequences = new Set();
+    if (events && events.length > 0) {
+      for (const event of events) {
+        clientSequences.add(event.sequence);
+      }
+    }
+
+    // Get events the client hasn't seen
+    const sinceSeq = events_since || 0;
+    const serverEvents = this.getServerEventsSince(sinceSeq, clientSequences);
 
     // Inject secrets into the API request
     let resolvedUrl = this.injectSecrets(apiRequest.url);
@@ -418,7 +438,7 @@ export class UserDO {
 
       return new Response(JSON.stringify({
         events_accepted: true,
-        server_events: [],
+        server_events: serverEvents,
         response: {
           status: apiResponse.status,
           headers: responseHeaders,
@@ -431,7 +451,7 @@ export class UserDO {
     } catch (e) {
       return new Response(JSON.stringify({
         events_accepted: true,
-        server_events: [],
+        server_events: serverEvents,
         response: null,
         error: "Upstream request failed: " + e.message,
       }), {
