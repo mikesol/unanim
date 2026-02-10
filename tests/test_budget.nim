@@ -40,10 +40,13 @@ proc measureGzipped(filePath: string, label: string, budgetBytes: int): BudgetRe
   if not fileExists(filePath):
     result.error = "file not found: " & filePath
     return
-  let (output, exitCode) = execCmdEx("gzip -c " & filePath & " | wc -c")
+  let (output, exitCode) = execCmdEx("gzip -c " & quoteShell(filePath) & " | wc -c")
   if exitCode == 0:
-    result.sizeBytes = output.strip().parseInt()
-    result.pass = result.sizeBytes <= budgetBytes
+    try:
+      result.sizeBytes = output.strip().parseInt()
+      result.pass = result.sizeBytes <= budgetBytes
+    except ValueError:
+      result.error = "unexpected gzip output: " & output.strip()
   else:
     result.error = output.strip()
 
@@ -86,4 +89,7 @@ echo ""
 # Clean up temporary files
 removeDir(outDir)
 
-echo "All budget tests passed."
+if warnings > 0:
+  echo "Budget check complete (Phase 3: warnings only, not failing)."
+else:
+  echo "All budget tests passed."
