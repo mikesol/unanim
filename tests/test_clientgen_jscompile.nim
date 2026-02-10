@@ -137,4 +137,20 @@ block testNimJsCompilationNoSecrets:
     "Compiled JS should not contain any secret placeholder pattern"
 
 echo "test_clientgen_jscompile: Test 6 passed."
+
+# Test 7: IndexedDB JS is syntactically valid
+block testIndexedDBJsSyntax:
+  const indexedDBJs = static(generateIndexedDBJs())
+  const tmpFile = "/tmp/unanim_test_indexeddb.js"
+  static:
+    writeFile(tmpFile, indexedDBJs)
+  const nodeCheck = gorgeEx("which node")
+  when nodeCheck[1] == 0:
+    const checkResult = gorgeEx("node --check " & tmpFile)
+    doAssert checkResult[1] == 0,
+      "Generated IndexedDB JS should be syntactically valid. Error: " & checkResult[0]
+    echo "test_clientgen_jscompile: Test 7 passed (node --check verified)."
+  else:
+    echo "test_clientgen_jscompile: Test 7 skipped (node not available)."
+
 echo "All client codegen integration tests passed."

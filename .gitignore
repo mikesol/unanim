@@ -4,6 +4,15 @@ nimcache/
 *.out
 *.app
 
+# Compiled test/validation binaries (Linux, no extension)
+tests/test_*
+validation/e2e_*
+!tests/test_*.nim
+!validation/e2e_*.nim
+
+# Generated validation output
+validation/indexeddb_test/
+
 # Generated artifacts
 _generated/
 
