@@ -482,4 +482,40 @@ block testDurableObjectSyncUsesServerEvents:
 
 echo "test_codegen: Task 32 passed."
 
+# --- Task 33: Worker routes /do/sync to DO ---
+block testWorkerRoutesSyncToDO:
+  let js = generateWorkerJs(@[], @[], hasDO = true)
+  doAssert "startsWith(\"/do/\")" in js,
+    "Worker should route all /do/* paths to DO"
+  doAssert "replace(/^\\/do/" in js,
+    "Worker should strip /do prefix when forwarding to DO"
+
+echo "test_codegen: Task 33 passed."
+
+# --- Task 34: DO JS standalone node --check ---
+import std/osproc
+
+block testDurableObjectJsNodeCheck:
+  let js = generateDurableObjectJs()
+  let tmpDir = "/tmp/unanim_do_sync_test"
+  createDir(tmpDir)
+  let jsFile = tmpDir & "/do_test.js"
+  writeFile(jsFile, js)
+  let (output, exitCode) = execCmdEx("node --check " & jsFile)
+  doAssert exitCode == 0,
+    "generateDurableObjectJs output must pass node --check. Errors: " & output
+
+echo "test_codegen: Task 34 passed (node --check verified)."
+
+# --- Task 35: verifyAndStoreEvents shared helper ---
+block testVerifyAndStoreEventsSharedHelper:
+  let js = generateDurableObjectJs()
+  doAssert "verifyAndStoreEvents" in js,
+    "DO should have shared verifyAndStoreEvents method"
+  # Both handleProxy and handleSync should call it
+  doAssert js.count("verifyAndStoreEvents") >= 3,
+    "verifyAndStoreEvents should be defined once and called in both handleProxy and handleSync"
+
+echo "test_codegen: Task 35 passed."
+
 echo "All codegen tests passed."

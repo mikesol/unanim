@@ -325,17 +325,7 @@ export class UserDO {
     });
   }
 
-  async handleProxy(request, corsHeaders) {
-    const body = await request.json();
-    const { events_since, events, request: apiRequest } = body;
-
-    if (!apiRequest || !apiRequest.url) {
-      return new Response(JSON.stringify({ error: "Missing 'request.url' in proxy body." }), {
-        status: 400,
-        headers: corsHeaders,
-      });
-    }
-
+  async verifyAndStoreEvents(events_since, events, corsHeaders) {
     // Determine expected next sequence from stored events
     let expectedNextSeq = 1;
     if (events_since && events_since > 0) {
@@ -353,34 +343,34 @@ export class UserDO {
     if (events && events.length > 0) {
       if (events[0].sequence !== expectedNextSeq) {
         const sinceSeq = events_since || 0;
-        const serverRows = this.sql.exec(
-          `SELECT sequence, timestamp, event_type, schema_version, payload FROM events WHERE sequence > ? ORDER BY sequence ASC`,
-          sinceSeq
-        ).toArray();
+        const serverEvents = this.getServerEventsSince(sinceSeq, new Set());
 
-        return new Response(JSON.stringify({
+        return { error: new Response(JSON.stringify({
           events_accepted: false,
           error: `Sequence gap: expected ${expectedNextSeq}, got ${events[0].sequence}`,
-          server_events: serverRows,
+          server_events: serverEvents,
           response: null,
         }), {
           status: 409,
           headers: corsHeaders,
-        });
+        }) };
       }
 
       // Verify internal sequence continuity
       for (let i = 1; i < events.length; i++) {
         if (events[i].sequence !== events[i - 1].sequence + 1) {
-          return new Response(JSON.stringify({
+          const sinceSeq = events_since || 0;
+          const serverEvents = this.getServerEventsSince(sinceSeq, new Set());
+
+          return { error: new Response(JSON.stringify({
             events_accepted: false,
             error: `Sequence gap at event ${i}: expected ${events[i - 1].sequence + 1}, got ${events[i].sequence}`,
-            server_events: this.getServerEventsSince(events_since || 0, new Set()),
+            server_events: serverEvents,
             response: null,
           }), {
             status: 409,
             headers: corsHeaders,
-          });
+          }) };
         }
       }
 
@@ -408,6 +398,24 @@ export class UserDO {
     // Get events the client hasn't seen
     const sinceSeq = events_since || 0;
     const serverEvents = this.getServerEventsSince(sinceSeq, clientSequences);
+
+    return { serverEvents };
+  }
+
+  async handleProxy(request, corsHeaders) {
+    const body = await request.json();
+    const { events_since, events, request: apiRequest } = body;
+
+    if (!apiRequest || !apiRequest.url) {
+      return new Response(JSON.stringify({ error: "Missing 'request.url' in proxy body." }), {
+        status: 400,
+        headers: corsHeaders,
+      });
+    }
+
+    const result = await this.verifyAndStoreEvents(events_since, events, corsHeaders);
+    if (result.error) return result.error;
+    const serverEvents = result.serverEvents;
 
     // Inject secrets into the API request
     let resolvedUrl = this.injectSecrets(apiRequest.url);
@@ -467,82 +475,12 @@ export class UserDO {
     const body = await request.json();
     const { events_since, events } = body;
 
-    // Determine expected next sequence from stored events
-    let expectedNextSeq = 1;
-    if (events_since && events_since > 0) {
-      expectedNextSeq = events_since + 1;
-    } else {
-      const lastRow = this.sql.exec(
-        `SELECT MAX(sequence) as latest FROM events`
-      ).one();
-      if (lastRow.latest) {
-        expectedNextSeq = lastRow.latest + 1;
-      }
-    }
-
-    // Verify and store incoming events (sequence continuity check)
-    if (events && events.length > 0) {
-      if (events[0].sequence !== expectedNextSeq) {
-        const sinceSeq = events_since || 0;
-        const serverRows = this.sql.exec(
-          `SELECT sequence, timestamp, event_type, schema_version, payload FROM events WHERE sequence > ? ORDER BY sequence ASC`,
-          sinceSeq
-        ).toArray();
-
-        return new Response(JSON.stringify({
-          events_accepted: false,
-          error: `Sequence gap: expected ${expectedNextSeq}, got ${events[0].sequence}`,
-          server_events: serverRows,
-          response: null,
-        }), {
-          status: 409,
-          headers: corsHeaders,
-        });
-      }
-
-      // Verify internal sequence continuity
-      for (let i = 1; i < events.length; i++) {
-        if (events[i].sequence !== events[i - 1].sequence + 1) {
-          return new Response(JSON.stringify({
-            events_accepted: false,
-            error: `Sequence gap at event ${i}: expected ${events[i - 1].sequence + 1}, got ${events[i].sequence}`,
-            server_events: this.getServerEventsSince(events_since || 0, new Set()),
-            response: null,
-          }), {
-            status: 409,
-            headers: corsHeaders,
-          });
-        }
-      }
-
-      // Store verified events
-      for (const event of events) {
-        this.sql.exec(
-          `INSERT INTO events (sequence, timestamp, event_type, schema_version, payload) VALUES (?, ?, ?, ?, ?)`,
-          event.sequence,
-          event.timestamp,
-          event.event_type,
-          event.schema_version,
-          event.payload
-        );
-      }
-    }
-
-    // Collect client event sequences for filtering
-    const clientSequences = new Set();
-    if (events && events.length > 0) {
-      for (const event of events) {
-        clientSequences.add(event.sequence);
-      }
-    }
-
-    // Get events the client hasn't seen
-    const sinceSeq = events_since || 0;
-    const serverEvents = this.getServerEventsSince(sinceSeq, clientSequences);
+    const result = await this.verifyAndStoreEvents(events_since, events, corsHeaders);
+    if (result.error) return result.error;
 
     return new Response(JSON.stringify({
       events_accepted: true,
-      server_events: serverEvents,
+      server_events: result.serverEvents,
       response: null,
     }), {
       status: 200,
