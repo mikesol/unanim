@@ -80,4 +80,4 @@ gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<thre
 
 ## Current phase
 
-Phase 1: Foundation (Milestone: "Phase 1: Foundation")
+Phase 4: Primitives (Milestone: "Phase 4: Primitives")

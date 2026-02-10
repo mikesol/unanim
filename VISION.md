@@ -1,9 +1,19 @@
-# Unanim — Vision 0.1.0
+# Unanim — Vision 0.2.0
 
 *A Nim-based compile-time framework that eliminates the backend by generating client applications, server-side proxy configurations, and state sync protocols from a single source.*
 
 *Latin unanimus: "of one mind." One source of truth. The compiler decides the rest.*
 
+> **Changelog from 0.2.0:**
+> - Revised Phase 4 primitive set based on analysis of 6 production webapps (autodock, veeton, revolt, extuitive-v2, activeloop, rightware/author) and competitor platforms (Convex, Cloudflare Workflows). See `docs/plans/2026-02-10-phase4-brainstorm.md`.
+> - Added `after(duration, handler)` primitive for one-shot delayed execution via DO Alarms. Distinct from `cron()` (recurring vs one-shot), validated by Revolt's Scheduler table pattern and Convex's `scheduler.runAfter`.
+> - Added `permit(state, roles)` primitive for RBAC authorization. Separate from `auth()` (identity vs authorization) and `guard()` (runtime role check vs compile-time structural constraint). Validated by Revolt (custom RBAC) and Activeloop (OpenFGA).
+> - Added `store(name)` primitive for file/blob storage via Cloudflare R2. Validated by all 6 surveyed apps requiring file uploads with signed URLs.
+> - Revised `webhook()` from per-request callback URL to stable incoming endpoint with signature verification. All 6 surveyed apps (including fal.ai integration) use stable endpoints with payload-based correlation, not per-request URLs.
+> - Replaced `safe {}` user-facing primitive with automatic context splitting as a compiler optimization. The compiler detects browser API usage as the split boundary and determines optimal client/server placement. Dual-target compilation becomes an internal mechanism, not a developer annotation.
+> - Added explicit rationale for keeping `guard()` separate from `permit()`: guard is a compile-time structural constraint on state transitions (which authority can cause which transitions), permit is a runtime identity-based access check (which users can perform which actions).
+> - Added reactive push as an explicit design feature with validation requirement. Server-minted events (from webhook, cron, after, guard) are pushed to connected clients over the existing WebSocket. Prior art: Convex reactive queries, Firebase onSnapshot, Supabase Realtime.
+>
 > **Changelog from 0.1.0:**
 > - Split Phase 3 into Phase 3 (lean sync) and Phase 3b (real-time & lease). Phase 3 proves the core sync protocol (proxyFetch piggybacking, 409 reconciliation, offline queue). Phase 3b adds WebSocket, lease mechanism, fencing tokens, and server takeover. Added assumption validation markers throughout Sections 4.3, 4.9, 9.6. See `docs/plans/2026-02-10-phase3-sync-design.md`.
 > - Added performance budgets and comparative benchmarking (Section 8) per spec-change #23. Establishes measurable targets against industry leaders (Qwik, Astro, Next.js, vanilla Cloudflare Workers) and CI-enforced size budgets for generated artifacts. Phased rollout: warnings in Phase 3, failures in Phase 4, full comparative suite in Phase 5.
@@ -51,11 +61,11 @@ The result is a single-file (or small-set-of-files) Nim program that compiles to
 
 **2. The compiler is the architect.** The Nim macro system examines the developer's (LLM's) code at compile time and determines what goes where. It identifies secret references, extracts webhook/cron handlers, checks whether handlers are portable (can execute server-side), analyzes API call patterns to determine delegation boundaries, and generates both client and server artifacts from a single source. The client/server boundary is a compiler output, not a developer input.
 
-**3. Boring primitives.** The developer-facing API is deliberately unclever. `proxyFetch` is fetch. `webhook` returns a URL. `secret("key-name")` is a string placeholder. `cron(schedule, handler)` is a timer. `guard("credits")` marks state as proxy-observable. There are no state machines, no reactive frameworks, no special syntax beyond what's needed to mark the things the server handles. An LLM trained on standard HTTP and JavaScript patterns can generate correct code with minimal framework-specific knowledge.
+**3. Boring primitives.** The developer-facing API is deliberately unclever. `proxyFetch` is fetch. `webhook` registers a URL. `secret("key-name")` is a string placeholder. `cron(schedule, handler)` is a recurring timer. `after(duration, handler)` is a one-shot timer. `guard("credits")` marks state as proxy-constrained. `permit("shoots", write = ["admin"])` is an access check. `store("photos")` is blob storage. `auth(providers = ["google"])` is login. There are no state machines, no reactive frameworks, no special syntax beyond what's needed to mark the things the server handles. An LLM trained on standard HTTP and JavaScript patterns can generate correct code with minimal framework-specific knowledge.
 
 **4. LLM-first authorship.** The system is designed for machine generation, not human typing. This affects every decision: compiler errors are structured, actionable, and reference specific documentation sections. Nim macros detect common LLM mistakes (passing unserialized closures across boundaries, using non-deterministic operations in portable code, calling `proxyFetch` without `secret()`) and produce errors that help the LLM self-correct. The guardrails are diagnostic -- they tell you *why* something failed and *how* to fix it, with enough context for an LLM to auto-correct on the next attempt.
 
-**5. Portability is a liveness property.** When the compiler checks whether code is "portable" (compiles to both JS and a server-side target), it's not enforcing correctness -- it's determining an operational fact about your code. Portable code *will run* regardless of whether the client is online: if the client is available, it runs there; if the client goes to sleep, the server takes over seamlessly. Non-portable code (anything that touches the DOM or browser APIs) can only run when the client is present. The compiler tells you which category each handler falls into, and the runtime handles the handoff transparently.
+**5. Portability is a liveness property.** When the compiler checks whether code is "portable" (compiles to both JS and a server-side target), it's not enforcing correctness -- it's determining an operational fact about your code. Portable code *will run* regardless of whether the client is online: if the client is available, it runs there; if the client goes to sleep, the server takes over seamlessly. Non-portable code (anything that touches the DOM or browser APIs) can only run when the client is present. The compiler tells you which category each handler falls into, and the runtime handles the handoff transparently. The developer never annotates portability -- the compiler detects browser API usage automatically and uses it as the client/server split boundary (see Section 4.6).
 
 **6. The proxy is powerful but domain-ignorant.** The server-side component manages credential injection, webhook routing, event log verification, state sync, portable handler execution, and auth. This is substantial machinery. But the proxy achieves all of this without domain knowledge. It doesn't know your data model, your business logic, or your schema. It processes event logs, verifies sequence continuity, swaps secrets, stores bytes, mints guarded-state events, and runs portable code. The complexity lives in the *protocol*, not in application-specific logic. If the proxy ever needs to understand *what* your application does (beyond the mechanical categories defined by the primitives), the architecture has failed.
 
@@ -108,22 +118,28 @@ The primary path (proxyFetch) does full verification. The secondary channels do 
 
 > **Assumption to validate (Phase 3):** proxyFetch-only sync (without secondary channels) is sufficient for the core use case. If Phase 3 testing reveals that users lose data from tab close without a preceding proxyFetch, the heartbeat/visibilitychange channels should be pulled from Phase 3b into Phase 3. The risk is highest on mobile where tab lifecycle is unpredictable.
 
-### `webhook(handler)`
+### `webhook(path, handler)`
 
-Mints a stable URL backed by a handler function. When an external service calls this URL, the handler executes. If the client is online, it executes on the client. If the client is offline, the proxy queues the payload; if the handler is portable (compiles to the server target), the proxy can execute it immediately and generate events in the log.
+Registers a stable incoming HTTP endpoint with signature verification. When an external service (Stripe, Clerk, fal.ai, etc.) sends a request to this URL, the handler executes. If the handler is portable (compiles to the server target), the proxy executes it immediately and generates events in the log. If not portable, the payload is queued until the client is available. Connected clients receive resulting events immediately via WebSocket push.
 
-Webhooks support GET requests and redirect responses (extending the base to cover OAuth callbacks). The compiler determines portability and annotates each webhook accordingly.
+Webhooks support GET requests and redirect responses (extending the base to cover OAuth callbacks). The compiler determines portability and annotates each webhook accordingly. Signature verification is configured per webhook (HMAC-SHA256, Ed25519, Svix, etc.) based on the external service's protocol.
 
 ```nim
-let wh = webhook(proc(data: JsonNode) =
-  let imageUrl = data["image_url"].getStr()
-  addToGallery(imageUrl)
+# Stripe payment webhook -- stable endpoint, signature-verified
+let onPayment = webhook("/stripe", proc(data: JsonNode) =
+  let amount = data["amount"].getInt()
+  db.insert("payments", Payment(id: newId(), amount: amount))
 )
-let response = proxyFetch(FAL_URL,
-  headers = {"Authorization": "Bearer " & secret("fal-key")},
-  body = %*{"prompt": prompt, "webhook_url": wh.url}
+
+# fal.ai result callback -- same stable endpoint, correlation via request_id
+let onImageReady = webhook("/fal", proc(data: JsonNode) =
+  let photoId = data["request_id"].getStr  # correlate with original request
+  let resultUrl = data["output"]["url"].getStr
+  db.update("photos", photoId, editedUrl = resultUrl)
 )
 ```
+
+**Design decision (validated against 6 production apps):** All surveyed apps -- including those using fal.ai's `webhook_url` parameter -- use stable, signature-verified endpoints with payload-based correlation (e.g., `request_id` in the payload maps to the original request). No app uses per-request dynamically-minted URLs. The webhook primitive therefore registers a fixed route, not a per-request URL.
 
 Webhooks and crons are top-level declarations in the Nim source. The compiler processes the entire program holistically and extracts them into proxy routes. There is no separate manifest file -- the source code is the manifest.
 
@@ -143,11 +159,37 @@ cron("0 */6 * * *", proc() =
 )
 ```
 
+### `after(duration, handler)`
+
+Schedules a one-shot delayed execution. Unlike `cron()` (recurring, top-level infrastructure), `after()` is called from within application logic to schedule future work for a specific context. The underlying implementation uses Cloudflare DO Alarms.
+
+```nim
+# After sending a quote, remind the customer in 7 days
+proc sendQuote(customerId: string, quoteId: string) =
+  let quote = db.get("quotes", quoteId)
+  discard proxyFetch(EMAIL_API,
+    headers = {"Authorization": "Bearer " & secret("email-key")},
+    body = %*{"to": quote.email, "template": "quote", "data": quote}
+  )
+  after(7.days, proc() =
+    let q = db.get("quotes", quoteId)
+    if q.status == Pending:  # only remind if still unsigned
+      discard proxyFetch(EMAIL_API,
+        headers = {"Authorization": "Bearer " & secret("email-key")},
+        body = %*{"to": q.email, "template": "quote_reminder", "data": q}
+      )
+  )
+```
+
+**Design decision (validated against production apps):** Revolt uses a `Scheduler` table with `scheduledAt` for patterns like "remind in 7 days" and "notify 14 days before installation." Convex provides `scheduler.runAfter(delay, fn)`. Cloudflare Workflows provides `step.sleep(duration)`. All three confirm that one-shot delayed execution is a distinct primitive from recurring cron jobs. The two differ in declaration site (cron is top-level, after is inline), recurrence (cron repeats, after fires once), and trigger (cron is clock-driven, after is event-driven).
+
 ### `guard(stateName: string)`
 
 Declares a piece of state as *guarded* -- meaning it has constraints that the proxy must enforce. Guarded state can be decreased by client events (spending credits) but can only be increased by proxy-generated events (minting credits after a successful API call, receiving a payment webhook).
 
 This is the Ethereum-light verification model: the proxy doesn't understand your business logic, but it knows that certain state transitions can only be authorized by specific event types. The compiler analyzes which operations touch guarded state and ensures they're bundled with proxy calls.
+
+**Why guard() is separate from permit():** Guard and permit both answer "who can do what," but they differ in enforcement mechanism and timing. Guard is a **compile-time structural constraint**: the compiler ensures that certain events can only be produced in server code paths. The client literally cannot generate a `credits_increased` event -- it's a structural impossibility enforced by code generation. Permit is a **runtime identity check**: the server inspects the user's role before accepting an event. The code to produce the event exists on the client, but the server gates it. These are orthogonal: you can have guarded state that any authenticated user can trigger (spending credits), and permitted actions on non-guarded state (only admins can rename the org). They compose naturally -- see the OrgShoots example in Section 4.10.
 
 ```nim
 guard("credits")  # Only proxy-generated events can increase credits
@@ -218,7 +260,79 @@ auth(
 
 **Secondary option:** For rapid prototyping, support Clerk as a zero-config hosted alternative (~15 lines of proxy code, no auth tables).
 
-### `safe { ... }` blocks
+### `permit(state, roles)`
+
+Declares role-based access control for state and operations. Auth provides identity ("who is this user?"); permit provides authorization ("what can this user do?"). Permit is optional -- apps without it allow any authenticated user to perform any action (subject to guard constraints).
+
+```nim
+auth(providers = ["google"], credentials = true, jwtSecret = secret("jwt-key"))
+
+# Define roles and access rules
+permit("shoots",
+  write = ["admin", "photographer"],
+  read = ["client", "viewer"]
+)
+permit("credits.spend", allowed = ["subscriber"])
+
+# Operations are checked at the DO level
+proc deleteShoot(id: string) =
+  # The DO verifies: does this user have "admin" or "photographer" role
+  # for this org's "shoots" state? If not, rejects with 403.
+  db.update("shoots", id, status = Deleted)
+```
+
+**Why permit() is separate from auth():** Auth is infrastructure you configure once (OAuth providers, JWT settings). Permit is business logic that changes frequently (role definitions, access rules). They generate different artifacts: auth generates HTTP routes (signup, login, OAuth callback), while permit generates check logic at the DO/event-acceptance layer. They can also be mixed: a developer might use Clerk for auth (zero-config hosted) but still need custom permit() rules that Clerk doesn't cover.
+
+**Design decision (validated against production apps):** Revolt has a custom RBAC system (`UserPermission` model with 8 permissions) completely separate from its Lucia auth. Activeloop uses Auth0 for identity and OpenFGA for authorization -- made by the same company but explicitly separate products. 4 of 6 surveyed apps have no separate permission layer (auth alone suffices), confirming that permit() should be opt-in, not required.
+
+### `store(name)`
+
+Declares a named blob storage bucket backed by Cloudflare R2. The compiler generates upload URL endpoints, download URL endpoints with signed URLs, and garbage collection hooks tied to event log compaction.
+
+```nim
+store("photos")  # Creates an R2 bucket binding for photo storage
+
+proc uploadPhoto(shootId: string, file: FileUpload) =
+  # Client requests a signed upload URL from the DO
+  let uploadUrl = store.getUploadUrl("photos", contentType = file.contentType)
+  # Client uploads directly to R2 (no proxy bandwidth cost)
+  # On completion, store the R2 key in the event log
+  db.insert("photos", Photo(id: newId(), shootId: shootId, url: uploadUrl.key))
+
+proc getPhotoUrl(photoId: string): string =
+  let photo = db.get("photos", photoId)
+  return store.getSignedUrl("photos", photo.url, expiry = 1.hours)
+```
+
+**Design decision (validated against production apps):** All 6 surveyed apps need file/blob storage (UploadThing, Supabase Storage, AWS S3, Azure Blob, DeepLake). The common pattern is: client gets signed upload URL, uploads directly to storage (bypassing the server), stores the key/reference in the database. R2's zero-egress pricing makes it ideal for asset-heavy apps. Garbage collection ties into event log compaction -- when events referencing an asset are compacted away, the R2 object is eligible for cleanup.
+
+### Automatic context splitting
+
+*Not a primitive the developer invokes*, but a compiler optimization that replaces the previously-proposed `safe {}` blocks. The compiler automatically determines optimal client/server execution placement by analyzing browser API usage.
+
+**How it works:** The compiler scans each code block for browser-only operations (DOM manipulation, Canvas API, WebAudio, `window.*`, `document.*`, etc.). Code without browser dependencies is *portable* -- the compiler can choose to run it on the client or server. Code with browser dependencies is *anchored* to the client.
+
+For blocks with multiple `proxyFetch` calls, the compiler uses browser API anchors as split boundaries:
+
+```nim
+proc processAndDisplay(prompt: string) =
+  # No browser APIs -- portable, compiler may move to server
+  let data = proxyFetch(DATA_API, headers = {"Auth": "Bearer " & secret("key")})
+  let analysis = proxyFetch(AI_API, body = %*{"data": data})
+
+  # Canvas API -- browser anchor, must run on client
+  let canvas = document.getElementById("preview").Canvas
+  canvas.drawImage(analysis.imageUrl)
+
+  # This proxyFetch stays client-side (anchored by canvas above)
+  let final = proxyFetch(SAVE_API, body = %*{"image": canvas.toDataURL()})
+```
+
+The compiler determines: the first two proxyFetch calls can be batched server-side (2 round-trips become 0). The canvas operation forces a return to the client. The final proxyFetch is a separate round-trip. Total: 2 round-trips instead of 3, with no developer annotation.
+
+**Design decision:** The original `safe {}` block required developers to manually annotate portable code. This was problematic: (1) pure computations are already deterministic without annotation, (2) the interesting code (proxyFetch, db operations) can't be in safe blocks, (3) none of 6 surveyed production apps have anything equivalent, (4) inconsistent annotation creates false confidence. Automatic detection is both more powerful and more ergonomic -- the compiler already analyzes code for proxyFetch, guard, shared, etc., so adding browser API detection is natural. The developer writes the same code either way; the compiler optimizes placement.
+
+### Portability check
 
 Pure computation blocks that compile to both JS (client) and C (server). The compiler proves that code inside a `safe` block is deterministic by attempting compilation to both targets -- any reference to browser APIs, non-deterministic operations, or side effects causes a compile-time error.
 
@@ -261,10 +375,11 @@ Event {
 The sequence number provides ordering and continuity checking. The proxy verifies that incoming events start at the expected sequence (last stored + 1) with no gaps -- without needing to understand the events themselves.
 
 **Event classification (from game netcode's "external event log" pattern):**
-- **Pure computations** (safe blocks): deterministic by construction. Re-executed during replay.
+- **Pure computations** (compiler-verified portable code): deterministic by construction. Re-executed during replay.
 - **External events** (API responses, webhook payloads): non-deterministic. Logged with results, substituted during replay.
 - **User inputs**: the action itself is the input. Applied from log during replay.
 - **Proxy-minted events**: only generated by the proxy. Cannot be forged by the client.
+- **Scheduled events**: generated by `after()` handlers when DO Alarms fire. Treated as proxy-minted.
 
 ### 4.3 Writer Model: Distributed Single-Player
 
@@ -317,6 +432,8 @@ The proxy doesn't understand *what* credits are. It knows: "for state marked as 
 2. **Per-user, proxy-observable (guarded):** State with constraints. Proxy enforces invariants via minted events. Declared with `guard()`.
 3. **Shared, multi-user:** Org-level state. Lives in an org-level DO. Multiple users connect via WebSocket, DO sequences all events. Declared with `shared()`. See Section 4.10.
 
+**Orthogonal to tiers:** `permit()` applies to any tier. A personal guarded state can have permit rules ("only subscribers can spend credits"). Shared state can have permit rules ("only admins can delete shoots"). Permit is about who can act; the tiers are about where state lives and how it's synchronized.
+
 ### 4.6 Compile-Time Delegation
 
 The Nim compiler analyzes code at compile time to determine what should run on the client vs. the server:
@@ -326,6 +443,8 @@ The Nim compiler analyzes code at compile time to determine what should run on t
 - **Guarded state mutations accompanying API calls:** The compiler bundles these with delegation automatically.
 
 The first proxyFetch call bootstraps the delegation. The server has the compiled program (portable Nim code compiled to JS running in the DO). The compiler makes this decision based on static analysis of the call graph -- no developer annotation required.
+
+**Automatic context splitting** extends this analysis. The compiler also detects browser API usage (DOM, Canvas, WebAudio, etc.) as *anchors* that force execution back to the client. Between anchors, the compiler batches server-side work. This means a block with 5 proxyFetch calls and 1 canvas operation in the middle becomes: 1 server-side batch (first N proxyFetch calls) → return to client (canvas) → remaining proxyFetch calls. The developer writes sequential code; the compiler finds the optimal split points.
 
 ```nim
 # The compiler sees 3 sequential proxyFetch calls
@@ -350,7 +469,7 @@ The event log grows indefinitely. To keep replay fast and storage bounded:
 
 ### 4.8 State Verification (Optional)
 
-For debugging and development, the framework supports optional state verification: the server can replay events through portable reducers (safe blocks) and compare materialized state with the client's state. This is the GGPO SyncTestSession pattern — dual-execution verification.
+For debugging and development, the framework supports optional state verification: the server can replay events through portable reducers (compiler-verified pure functions) and compare materialized state with the client's state. This is the GGPO SyncTestSession pattern — dual-execution verification.
 
 When states differ, a hierarchical Merkle tree over state domains enables O(log N) divergence localization:
 
@@ -363,7 +482,7 @@ Root Hash = hash(
 )
 ```
 
-This is a development/debugging tool, not a runtime gate. The primary verification is sequence continuity (Section 4.4). State verification catches determinism bugs in safe blocks during testing.
+This is a development/debugging tool, not a runtime gate. The primary verification is sequence continuity (Section 4.4). State verification catches determinism bugs in portable reducers during testing.
 
 ### 4.9 The WebSocket Channel [Phase 3b]
 
@@ -384,6 +503,12 @@ The client maintains a hibernated WebSocket connection to its Durable Object (in
 4. **Richer sync UX.** The client can show "synced" / "pending" / "receiving update..." states accurately, because the DO pushes events as they happen rather than batching them on the next proxyFetch.
 
 5. **No separate heartbeat infrastructure.** The WebSocket auto-response mechanism (`setWebSocketAutoResponse`) handles lease detection without additional plumbing.
+
+6. **Reactive push for server-minted events.** When a `webhook()` fires, a `cron()` runs, an `after()` triggers, or a `guard()` mints events, the DO pushes resulting events to connected clients immediately over the existing WebSocket. This provides Convex-style reactive updates (queries auto-update when data changes) without a separate subscription system -- the WebSocket already exists for lease detection and shared state, so pushing server-minted events is incremental work, not a new system.
+
+**Prior art:** Convex reactive queries (automatic re-execution when dependent data changes), Firebase `onSnapshot` (real-time document listeners), Supabase Realtime (Postgres changes streamed to clients). Unanim achieves the same result through event push over the existing DO WebSocket rather than a separate subscription protocol.
+
+> **Assumption to validate (Phase 4):** Reactive push for server-minted events flows naturally from the existing WebSocket infrastructure. Specifically: when a webhook handler executes on the DO and produces events, those events must be pushed to all connected WebSocket clients for that user (personal DO) or org (org DO) within the same request handler, without additional infrastructure. A validation test must demonstrate: (1) webhook fires on the DO, (2) event stored in SQLite, (3) event pushed over WebSocket to connected client, (4) client applies event and updates UI -- all within a single end-to-end flow. If this requires significant new infrastructure beyond "push events to `getWebSockets()` after processing," the assumption is wrong and reactive push needs its own design phase.
 
 **What the WebSocket does NOT change:**
 
@@ -719,7 +844,7 @@ Event types are defined in Nim code. The compiler is the schema registry.
 **Tier 2 -- Upcasting (Pure Function Transformers):**
 - Structural event changes: `oldEvent -> newEvent`
 - Applied on read, not on stored data
-- Must be `safe` blocks (compiler-verified pure)
+- Must be compiler-verified pure functions (no side effects, no browser APIs, no network calls)
 - Can be chained: v1 -> v2 -> v3
 - Auto-generated by compiler for simple transformations, LLM-authored for complex ones
 
@@ -746,10 +871,11 @@ Each event includes a `schema_version` field. When the proxy encounters events f
 | Per-user state | Durable Object (SQLite) | Event log, materialized state, lease, secrets |
 | Shared metadata | D1 | User lookup, auth tables, webhook routing |
 | Auth data | D1 | User/account tables (Oslo + Arctic generated) |
-| Assets | R2 | Blob storage (images, files), zero egress |
+| File storage | R2 | `store()` primitive — blob storage (images, files), zero egress, signed URLs |
 | Config | KV | Feature flags, public keys |
 | Async work | Queues | Webhook payload buffering |
-| Scheduled work | Cron Triggers | `cron()` primitive |
+| Recurring work | Cron Triggers | `cron()` primitive |
+| Delayed work | DO Alarms | `after()` primitive — one-shot scheduled execution |
 | Offline processing | DO Alarms | Server-side handler execution when client is offline |
 | Auth secrets | Worker Secrets | JWT signing key, OAuth client secrets |
 
@@ -1123,16 +1249,15 @@ Phase 2: State  [COMPLETE]
   - IndexedDB storage on client, SQLite storage in DO
   - Validate: events survive browser refresh, DO restart
 
-Phase 3: Sync (lean)
+Phase 3: Sync (lean)  [COMPLETE]
   - Client sync layer: proxyFetch automatically carries event delta
   - DO returns missed server_events bidirectionally
   - New /do/sync endpoint for event-only exchange (no API forwarding)
   - 409 reconciliation: server wins, client discards conflicting events, retries
   - Offline queue: events buffered in IndexedDB, API calls NOT queued
-  - Validate: airplane mode test, two-tab 409 test
-  - Performance: size budgets as CI warnings, first reference app (todo)
-  - Assumption validation: proxyFetch overhead, 409 UX, IndexedDB latency,
-    sync glue size, proxyFetch-only sufficiency
+  - Todo reference app deployed to Cloudflare, validated in browser
+  - Performance: size budgets as CI warnings (all artifacts within budget)
+  - All 5 Phase 3 assumptions validated (see VALIDATION_LOG_SYNC.md)
 
 Phase 3b: Real-Time & Lease
   - WebSocket channel to DO (hibernated, server→client push)
@@ -1148,11 +1273,16 @@ Phase 3b: Real-Time & Lease
     WebSocket moves earlier.
 
 Phase 4: Primitives
-  - guard() + proxy-minted events
-  - webhook() + cron()
-  - shared() + org DO + barrier broadcast
-  - auth()
-  - Validate: OrgShoots stress tests
+  - guard() + proxy-minted events (compile-time structural constraints)
+  - permit() + RBAC (runtime identity-based access control)
+  - webhook() stable endpoints + signature verification
+  - cron() recurring + after() one-shot delayed execution
+  - shared() + org DO + barrier broadcast + WebSocket
+  - auth() + OAuth + JWT
+  - store() + R2 file/blob storage + signed URLs
+  - Automatic context splitting (compiler optimization, replaces safe{})
+  - Reactive push: server-minted events pushed over WebSocket
+  - Validate: OrgShoots stress tests, reactive push test
   - Performance: size budgets as CI failures, CRUD dashboard reference app, Lighthouse CI
 
 Phase 5: Battle Testing
@@ -1188,7 +1318,12 @@ This vision doc should be updated as the build progresses. When an assumption is
 | Proxyetch piggyback sync | (none) | -- | Novel: sync piggybacked on application API calls |
 | Lease detection | Gray-Cheriton 1989, etcd, Consul | Time-bounded leases, opportunistic renewal, fencing tokens | DO WebSocket hibernation + `setWebSocketAutoResponse` as zero-cost presence |
 | Server event push | Firebase, PouchDB | Real-time push over persistent connection | Scoped to single-user DO, not cross-DO fan-out |
+| Reactive push | Convex reactive queries, Firebase `onSnapshot`, Supabase Realtime | Auto-update when data changes | Server-minted events pushed over existing DO WebSocket — no separate subscription protocol |
 | Multi-user shared state | Replicache/Zero (server reconciliation), game netcode (dumb relay) | DO as sequencer, optimistic local + confirm/rollback, total ordering via single-threaded DO | Compiler-inferred operation classification (optimistic/barrier/verified), no developer annotation |
+| One-shot delayed execution | Convex `scheduler.runAfter`, CF Workflows `step.sleep`, Revolt Scheduler table | Deferred one-shot execution | DO Alarms as `after()` primitive, distinct from recurring `cron()` |
+| RBAC authorization | Auth0 + OpenFGA, Revolt UserPermission | Role-based access control separate from identity | `permit()` generates DO-level checks, separate from `auth()` identity |
+| File/blob storage | S3, Supabase Storage, UploadThing | Signed upload URLs, direct-to-storage uploads | R2 as `store()` primitive, zero egress, GC tied to event log compaction |
+| Automatic context splitting | (none) | -- | Novel: compiler detects browser API anchors and optimizes client/server split points, replacing manual `safe {}` annotations |
 
 ## Appendix B: Research Conducted
 
@@ -1318,13 +1453,15 @@ Free variables are hoisted to function parameters. The block is compiled to C. I
 ### What the POC does NOT cover (to be built)
 
 The POC demonstrates the macro mechanics (AST rewriting, dual-target compilation, tree shaking). It does NOT implement:
-- The `proxyFetch`/`guard()`/`shared()` primitives (detection and code generation)
-- Event log generation, hash chain construction, or sync protocol
+- The `proxyFetch`/`guard()`/`shared()`/`permit()`/`store()` primitives (detection and code generation)
+- Event log generation or sync protocol
 - The IndexedDB abstraction layer
 - The Cloudflare Worker/DO code generation
 - The operation classification algorithm (optimistic/barrier/verified)
+- Automatic context splitting (browser API anchor detection)
+- The `after()` primitive (DO Alarm scheduling)
 
-These are the build tasks. The POC establishes that Nim's macro system is powerful enough to support them.
+These are the build tasks. The POC establishes that Nim's macro system is powerful enough to support them. The dual-target compilation demonstrated by the POC's `safe()` blocks is the foundation for automatic context splitting — the same mechanism (compile to both JS and C, reject non-portable code) is now applied automatically by the compiler rather than requiring developer annotation.
 
 ## Appendix D: Complete App Example
 
@@ -1333,16 +1470,23 @@ What a developer (or LLM) writes — a complete OrgShoots app using every primit
 ```nim
 import unanim
 
-# --- Auth ---
+# --- Auth + Permissions ---
 auth(
   providers = ["google"],
   credentials = true,
   jwtSecret = secret("jwt-signing-key")
 )
 
+permit("shoots",
+  write = ["admin", "photographer"],
+  read = ["client", "viewer"]
+)
+permit("credits.spend", allowed = ["admin", "photographer"])
+
 # --- State declarations ---
 shared("shoots")
 guard("credits")
+store("photos")  # R2 bucket for photo storage
 
 type
   ShootStatus = enum Active, Deleted
@@ -1350,8 +1494,8 @@ type
     id, name, createdBy: string
     status: ShootStatus
   Photo = object
-    id, shootId, url: string
-    editedUrl: string  # empty until AI-edited
+    id, shootId, r2Key: string
+    editedR2Key: string  # empty until AI-edited
 
 # --- Migrations (compiler validates all queries against these) ---
 migration(1, "initial"):
@@ -1359,35 +1503,43 @@ migration(1, "initial"):
     CREATE TABLE shoots (id TEXT PRIMARY KEY, name TEXT, created_by TEXT,
                          status TEXT DEFAULT 'Active');
     CREATE TABLE photos (id TEXT PRIMARY KEY, shoot_id TEXT REFERENCES shoots(id),
-                         url TEXT, edited_url TEXT DEFAULT '');
+                         r2_key TEXT, edited_r2_key TEXT DEFAULT '');
   """
 
 # --- Operations on shared state ---
 proc createShoot(name: string) =
+  # permit() check: requires "admin" or "photographer" role for "shoots" write
   let s = Shoot(id: newId(), name: name, createdBy: currentUser(),
                 status: Active)
   db.insert("shoots", s)
 
 proc deleteShoot(id: string) =
+  # permit() check + barrier (compiler-inferred from status = Deleted)
   db.update("shoots", id, status = Deleted)
 
-proc addPhoto(shootId: string, url: string) =
-  let p = Photo(id: newId(), shootId: shootId, url: url)
+proc addPhoto(shootId: string, file: FileUpload) =
+  # Upload directly to R2 via signed URL (no proxy bandwidth cost)
+  let key = store.upload("photos", file)
+  let p = Photo(id: newId(), shootId: shootId, r2Key: key)
   db.insert("photos", p)
 
 proc editPhoto(shootId: string, photoId: string, prompt: string) =
   let photo = db.get("photos", photoId)
+  let photoUrl = store.getSignedUrl("photos", photo.r2Key, expiry = 1.hours)
   let result = proxyFetch("https://api.openai.com/v1/images/edits",
     headers = {"Authorization": "Bearer " & secret("openai-key")},
-    body = %*{"image": photo.url, "prompt": prompt}
+    body = %*{"image": photoUrl, "prompt": prompt}
   )
-  db.update("photos", photoId, editedUrl = result["url"].getStr)
+  db.update("photos", photoId, editedR2Key = result["r2_key"].getStr)
 
 # --- Webhook: receive processed images from async pipeline ---
-let onImageReady = webhook(proc(data: JsonNode) =
-  let photoId = data["photo_id"].getStr
-  let resultUrl = data["result_url"].getStr
-  db.update("photos", photoId, editedUrl = resultUrl)
+let onImageReady = webhook("/fal", proc(data: JsonNode) =
+  let photoId = data["request_id"].getStr  # correlate via request ID
+  let resultUrl = data["output"]["url"].getStr
+  # Download result and store in R2
+  let key = store.importUrl("photos", resultUrl)
+  db.update("photos", photoId, editedR2Key = key)
+  # Connected clients receive this event immediately via WebSocket push
 )
 
 # --- Cron: refresh pricing data daily ---
@@ -1397,6 +1549,18 @@ cron("0 0 * * *", proc() =
   )
   db.upsert("config", "pricing", value = pricing)
 )
+
+# --- After: remind about inactive shoots ---
+proc markShootForReview(shootId: string) =
+  db.update("shoots", shootId, needsReview = true)
+  after(14.days, proc() =
+    let shoot = db.get("shoots", shootId)
+    if shoot.needsReview and shoot.status == Active:
+      discard proxyFetch(EMAIL_API,
+        headers = {"Authorization": "Bearer " & secret("email-key")},
+        body = %*{"template": "shoot_reminder", "shoot": shoot}
+      )
+  )
 
 # --- UI (islands-style DSL) ---
 page:
@@ -1426,11 +1590,11 @@ page:
 |---|---|
 | `_generated/client/app.js` | Islands JS, IndexedDB abstraction, sync client, reactive queries |
 | `_generated/client/index.html` | Static HTML shell + script tags |
-| `_generated/cloudflare/worker.js` | Router Worker (JWT validation, routing to DOs) |
-| `_generated/cloudflare/user-do.js` | Per-user Durable Object (personal state, lease, offline handlers) |
-| `_generated/cloudflare/org-do.js` | Org-level Durable Object (shared state, event sequencing, barrier broadcast) |
+| `_generated/cloudflare/worker.js` | Router Worker (JWT validation, RBAC middleware, routing to DOs) |
+| `_generated/cloudflare/user-do.js` | Per-user Durable Object (personal state, lease, offline handlers, alarm handlers for `after()`) |
+| `_generated/cloudflare/org-do.js` | Org-level Durable Object (shared state, event sequencing, barrier broadcast, permit checks) |
 | `_generated/migrations/001_initial.sql` | SQLite DDL from `migration(1, ...)` |
-| `_generated/cloudflare/wrangler.toml` | DO bindings, D1 binding, R2 binding, cron triggers, secrets |
+| `_generated/cloudflare/wrangler.toml` | DO bindings, D1 binding, R2 binding (`store("photos")`), cron triggers, secrets |
 | `_generated/openapi.yaml` | API spec for proxyFetch endpoints + webhooks |
-| `_generated/functions/webhooks/on_image_ready.js` | Standalone webhook handler (portable) |
+| `_generated/functions/webhooks/fal.js` | Standalone webhook handler (portable, signature-verified) |
 | `_generated/functions/cron/daily_pricing.js` | Standalone cron handler (portable) |
