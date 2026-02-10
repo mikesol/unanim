@@ -243,6 +243,8 @@ export class UserDO {
         return await this.getStatus(corsHeaders);
       } else if (path === "/proxy" && request.method === "POST") {
         return await this.handleProxy(request, corsHeaders);
+      } else if (path === "/sync" && request.method === "POST") {
+        return await this.handleSync(request, corsHeaders);
       } else {
         return new Response(JSON.stringify({ error: "Not found" }), {
           status: 404,
@@ -303,6 +305,14 @@ export class UserDO {
     });
   }
 
+  getServerEventsSince(eventsSince, clientSequences) {
+    const rows = this.sql.exec(
+      `SELECT sequence, timestamp, event_type, schema_version, payload FROM events WHERE sequence > ? ORDER BY sequence ASC`,
+      eventsSince
+    ).toArray();
+    return rows.filter(row => !clientSequences.has(row.sequence));
+  }
+
   injectSecrets(value) {
     if (typeof value !== "string") return value;
     return value.replace(/<<SECRET:([^>]+)>>/g, (match, secretName) => {
@@ -315,17 +325,7 @@ export class UserDO {
     });
   }
 
-  async handleProxy(request, corsHeaders) {
-    const body = await request.json();
-    const { events_since, events, request: apiRequest } = body;
-
-    if (!apiRequest || !apiRequest.url) {
-      return new Response(JSON.stringify({ error: "Missing 'request.url' in proxy body." }), {
-        status: 400,
-        headers: corsHeaders,
-      });
-    }
-
+  async verifyAndStoreEvents(events_since, events, corsHeaders) {
     // Determine expected next sequence from stored events
     let expectedNextSeq = 1;
     if (events_since && events_since > 0) {
@@ -343,34 +343,34 @@ export class UserDO {
     if (events && events.length > 0) {
       if (events[0].sequence !== expectedNextSeq) {
         const sinceSeq = events_since || 0;
-        const serverRows = this.sql.exec(
-          `SELECT sequence, timestamp, event_type, schema_version, payload FROM events WHERE sequence > ? ORDER BY sequence ASC`,
-          sinceSeq
-        ).toArray();
+        const serverEvents = this.getServerEventsSince(sinceSeq, new Set());
 
-        return new Response(JSON.stringify({
+        return { error: new Response(JSON.stringify({
           events_accepted: false,
           error: `Sequence gap: expected ${expectedNextSeq}, got ${events[0].sequence}`,
-          server_events: serverRows,
+          server_events: serverEvents,
           response: null,
         }), {
           status: 409,
           headers: corsHeaders,
-        });
+        }) };
       }
 
       // Verify internal sequence continuity
       for (let i = 1; i < events.length; i++) {
         if (events[i].sequence !== events[i - 1].sequence + 1) {
-          return new Response(JSON.stringify({
+          const sinceSeq = events_since || 0;
+          const serverEvents = this.getServerEventsSince(sinceSeq, new Set());
+
+          return { error: new Response(JSON.stringify({
             events_accepted: false,
             error: `Sequence gap at event ${i}: expected ${events[i - 1].sequence + 1}, got ${events[i].sequence}`,
-            server_events: [],
+            server_events: serverEvents,
             response: null,
           }), {
             status: 409,
             headers: corsHeaders,
-          });
+          }) };
         }
       }
 
@@ -386,6 +386,36 @@ export class UserDO {
         );
       }
     }
+
+    // Collect client event sequences for filtering
+    const clientSequences = new Set();
+    if (events && events.length > 0) {
+      for (const event of events) {
+        clientSequences.add(event.sequence);
+      }
+    }
+
+    // Get events the client hasn't seen
+    const sinceSeq = events_since || 0;
+    const serverEvents = this.getServerEventsSince(sinceSeq, clientSequences);
+
+    return { serverEvents };
+  }
+
+  async handleProxy(request, corsHeaders) {
+    const body = await request.json();
+    const { events_since, events, request: apiRequest } = body;
+
+    if (!apiRequest || !apiRequest.url) {
+      return new Response(JSON.stringify({ error: "Missing 'request.url' in proxy body." }), {
+        status: 400,
+        headers: corsHeaders,
+      });
+    }
+
+    const result = await this.verifyAndStoreEvents(events_since, events, corsHeaders);
+    if (result.error) return result.error;
+    const serverEvents = result.serverEvents;
 
     // Inject secrets into the API request
     let resolvedUrl = this.injectSecrets(apiRequest.url);
@@ -418,7 +448,7 @@ export class UserDO {
 
       return new Response(JSON.stringify({
         events_accepted: true,
-        server_events: [],
+        server_events: serverEvents,
         response: {
           status: apiResponse.status,
           headers: responseHeaders,
@@ -431,7 +461,7 @@ export class UserDO {
     } catch (e) {
       return new Response(JSON.stringify({
         events_accepted: true,
-        server_events: [],
+        server_events: serverEvents,
         response: null,
         error: "Upstream request failed: " + e.message,
       }), {
@@ -439,6 +469,23 @@ export class UserDO {
         headers: corsHeaders,
       });
     }
+  }
+
+  async handleSync(request, corsHeaders) {
+    const body = await request.json();
+    const { events_since, events } = body;
+
+    const result = await this.verifyAndStoreEvents(events_since, events, corsHeaders);
+    if (result.error) return result.error;
+
+    return new Response(JSON.stringify({
+      events_accepted: true,
+      server_events: result.serverEvents,
+      response: null,
+    }), {
+      status: 200,
+      headers: corsHeaders,
+    });
   }
 }
 """

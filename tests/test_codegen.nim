@@ -428,4 +428,97 @@ block testWorkerRoutesProxy:
 
 echo "test_codegen: Task 28 passed."
 
+# --- Task 29: DO /proxy returns bidirectional server_events ---
+block testDurableObjectProxyBidirectionalEvents:
+  let js = generateDurableObjectJs()
+  doAssert "getServerEventsSince" in js,
+    "DO should have helper to get server events since a sequence"
+  doAssert "server_events: []" notin js,
+    "DO /proxy should NOT hardcode server_events to empty array"
+
+echo "test_codegen: Task 29 passed."
+
+# --- Task 30: DO has /sync endpoint ---
+block testDurableObjectSyncEndpoint:
+  let js = generateDurableObjectJs()
+  doAssert "handleSync" in js,
+    "DO should have handleSync method"
+  doAssert "\"/sync\"" in js,
+    "DO fetch should route /sync path"
+
+echo "test_codegen: Task 30a passed."
+
+block testDurableObjectSyncRequestFormat:
+  let js = generateDurableObjectJs()
+  doAssert "events_since" in js,
+    "DO /sync should read events_since"
+
+echo "test_codegen: Task 30b passed."
+
+block testDurableObjectSyncResponseFormat:
+  let js = generateDurableObjectJs()
+  doAssert "events_accepted" in js,
+    "DO /sync response should include events_accepted"
+
+echo "test_codegen: Task 30c passed."
+
+# --- Task 31: DO /sync uses same sequence verification as /proxy ---
+block testDurableObjectSyncSequenceVerification:
+  let js = generateDurableObjectJs()
+  let proxyPos = js.find("handleProxy")
+  let syncPos = js.find("handleSync")
+  doAssert proxyPos > 0 and syncPos > 0,
+    "Both handleProxy and handleSync must exist"
+  doAssert js.count("409") >= 2,
+    "Both /proxy and /sync should return 409 on sequence mismatch"
+
+echo "test_codegen: Task 31 passed."
+
+# --- Task 32: DO /sync uses getServerEventsSince ---
+block testDurableObjectSyncUsesServerEvents:
+  let js = generateDurableObjectJs()
+  doAssert js.count("getServerEventsSince") >= 3,
+    "getServerEventsSince should be defined once and called in both handleProxy and handleSync"
+
+echo "test_codegen: Task 32 passed."
+
+# --- Task 33: Worker routes /do/sync to DO ---
+block testWorkerRoutesSyncToDO:
+  let js = generateWorkerJs(@[], @[], hasDO = true)
+  doAssert "startsWith(\"/do/\")" in js,
+    "Worker should route all /do/* paths to DO"
+  doAssert "replace(/^\\/do/" in js,
+    "Worker should strip /do prefix when forwarding to DO"
+
+echo "test_codegen: Task 33 passed."
+
+# --- Task 34: DO JS standalone node --check ---
+import std/osproc
+
+block testDurableObjectJsNodeCheck:
+  let (_, whichExitCode) = execCmdEx("which node")
+  if whichExitCode != 0:
+    echo "test_codegen: Task 34 skipped (node not found on PATH)."
+  else:
+    let js = generateDurableObjectJs()
+    let tmpDir = "/tmp/unanim_do_sync_test"
+    createDir(tmpDir)
+    let jsFile = tmpDir & "/do_test.js"
+    writeFile(jsFile, js)
+    let (output, exitCode) = execCmdEx("node --check " & jsFile)
+    doAssert exitCode == 0,
+      "generateDurableObjectJs output must pass node --check. Errors: " & output
+    echo "test_codegen: Task 34 passed (node --check verified)."
+
+# --- Task 35: verifyAndStoreEvents shared helper ---
+block testVerifyAndStoreEventsSharedHelper:
+  let js = generateDurableObjectJs()
+  doAssert "verifyAndStoreEvents" in js,
+    "DO should have shared verifyAndStoreEvents method"
+  # Both handleProxy and handleSync should call it
+  doAssert js.count("verifyAndStoreEvents") >= 3,
+    "verifyAndStoreEvents should be defined once and called in both handleProxy and handleSync"
+
+echo "test_codegen: Task 35 passed."
+
 echo "All codegen tests passed."
