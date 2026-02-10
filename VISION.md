@@ -5,6 +5,7 @@
 *Latin unanimus: "of one mind." One source of truth. The compiler decides the rest.*
 
 > **Changelog from 0.1.0:**
+> - Split Phase 3 into Phase 3 (lean sync) and Phase 3b (real-time & lease). Phase 3 proves the core sync protocol (proxyFetch piggybacking, 409 reconciliation, offline queue). Phase 3b adds WebSocket, lease mechanism, fencing tokens, and server takeover. Added assumption validation markers throughout Sections 4.3, 4.9, 9.6. See `docs/plans/2026-02-10-phase3-sync-design.md`.
 > - Added performance budgets and comparative benchmarking (Section 8) per spec-change #23. Establishes measurable targets against industry leaders (Qwik, Astro, Next.js, vanilla Cloudflare Workers) and CI-enforced size budgets for generated artifacts. Phased rollout: warnings in Phase 3, failures in Phase 4, full comparative suite in Phase 5.
 > - Removed event hash chain (`state_hash_after`, `parent_hash`) per spec-change #21. Replaced with sequence-number continuity checking. The hash chain added complexity without preventing any concrete abuse that sequence numbers + server-side enforcement don't already cover. See #21 for full analysis.
 > - Moved state verification (Merkle tree, dual-execution replay) to optional debugging tool (Section 4.8)
@@ -95,7 +96,7 @@ A fetch call that routes through the proxy. If the request contains `secret()` m
 
 `proxyFetch` is the *primary* sync boundary. Every `proxyFetch` call carries the event log delta since the last successful sync. The proxy uses this log to: verify sequence continuity (no gaps or conflicts), update the server-side state mirror, meter API usage, mint guarded-state events (e.g., credit deductions), and deliver any server-side results (webhook payloads, cron outputs) back to the client.
 
-**Secondary sync channels:** Because proxyFetch-only sync leaves purely-local sessions vulnerable (especially Safari's 7-day eviction), a lightweight hybrid sync strategy supplements the primary path:
+**Secondary sync channels [Phase 3b]:** Because proxyFetch-only sync leaves purely-local sessions vulnerable (especially Safari's 7-day eviction), a lightweight hybrid sync strategy supplements the primary path:
 
 1. **Heartbeat** -- if state is dirty and no sync has occurred in N seconds, flush to server
 2. **Page lifecycle** -- `visibilitychange` + `navigator.sendBeacon` syncs on tab close/switch
@@ -104,6 +105,8 @@ A fetch call that routes through the proxy. If the request contains `secret()` m
 5. **`navigator.storage.persist()`** -- requested on first load to protect against eviction
 
 The primary path (proxyFetch) does full verification. The secondary channels do state persistence only (no verification, just storage). This maintains the principle that verification happens at cost-inducing boundaries while ensuring state durability.
+
+> **Assumption to validate (Phase 3):** proxyFetch-only sync (without secondary channels) is sufficient for the core use case. If Phase 3 testing reveals that users lose data from tab close without a preceding proxyFetch, the heartbeat/visibilitychange channels should be pulled from Phase 3b into Phase 3. The risk is highest on mobile where tab lifecycle is unpredictable.
 
 ### `webhook(handler)`
 
@@ -267,7 +270,11 @@ The sequence number provides ordering and continuity checking. The proxy verifie
 
 This is NOT multiplayer. There is exactly one writer at any time -- either the client or the server, never both. This eliminates the need for CRDTs, multi-writer conflict resolution, or consensus protocols.
 
-**Lease model (adapted from LiteFS):**
+**Phased implementation:** The full lease model (below) is implemented in Phase 3b. Phase 3 (lean) implements the core sync protocol without lease/fencing — the client is always the writer, and the server only stores events and returns them. This is sufficient to validate the sync protocol end-to-end. Phase 3b adds server takeover, which requires the lease mechanism.
+
+> **Assumption to validate (Phase 3):** The lean model (client always writes, no server takeover) is sufficient for the core sync use case. If Phase 3 reveals that apps frequently need server-side event generation while the client is away (e.g., webhook results), Phase 3b becomes urgent. If most apps only need sync when the client is active, Phase 3b can be deferred further.
+
+**Lease model (adapted from LiteFS) [Phase 3b]:**
 - The client holds the write lease while online
 - Lease is maintained via proxyFetch calls (each call renews the lease)
 - If the lease expires (client offline, no proxyFetch for N seconds), the server takes over
@@ -275,7 +282,7 @@ This is NOT multiplayer. There is exactly one writer at any time -- either the c
 - When the client reconnects, it receives the server-generated events and applies them locally
 - The client resumes the lease
 
-**Fencing tokens (from LiteFS):** Each lease transfer increments a monotonic fencing token. Events include the fencing token of the lease holder that generated them. If a stale client (with an old fencing token) tries to push events after lease transfer, the proxy rejects them. This prevents split-brain: the client's reconnection sync always starts by acknowledging the server's events before pushing its own.
+**Fencing tokens (from LiteFS) [Phase 3b]:** Each lease transfer increments a monotonic fencing token. Events include the fencing token of the lease holder that generated them. If a stale client (with an old fencing token) tries to push events after lease transfer, the proxy rejects them. This prevents split-brain: the client's reconnection sync always starts by acknowledging the server's events before pushing its own.
 
 **Reconnection merge:** Since only one writer exists at any time, the merge is sequential, not concurrent. The server's events (generated during offline) come first; the client's events (generated during the lease gap, if any) come after. If the client made local changes during the brief window between lease expiry and reconnection, those are appended after the server's events. The client rebases its materialized state.
 
@@ -358,7 +365,11 @@ Root Hash = hash(
 
 This is a development/debugging tool, not a runtime gate. The primary verification is sequence continuity (Section 4.4). State verification catches determinism bugs in safe blocks during testing.
 
-### 4.9 The WebSocket Channel
+### 4.9 The WebSocket Channel [Phase 3b]
+
+**Phased implementation:** The WebSocket channel is implemented in Phase 3b, after the core sync protocol (Phase 3) is validated. Phase 3 uses HTTP POST exclusively for proxyFetch and sync. Phase 3b upgrades proxyFetch to ride the WebSocket when available, with HTTP as fallback.
+
+> **Assumption to validate (Phase 3):** HTTP-only sync provides acceptable latency and UX. If Phase 3 measurements show that HTTP round-trip overhead (connection setup, TLS) makes sync feel sluggish compared to WebSocket, Phase 3b's WebSocket upgrade becomes higher priority. The 20ms overhead budget (Section 8.1) is the threshold.
 
 The client maintains a hibernated WebSocket connection to its Durable Object (introduced for lease detection in Section 9.6). This connection exists regardless -- it's needed for presence. Since it's already there, it becomes a general-purpose channel between the user's DO and their client.
 
@@ -889,7 +900,8 @@ Each reference app is built in Unanim, Next.js, Astro, and Qwik. Benchmarks run 
 | Phase | Enforcement |
 |---|---|
 | Phase 2 (State) | No enforcement. Budgets are documented targets only. |
-| Phase 3 (Sync) | Size budgets as **CI warnings**. First reference app (todo). |
+| Phase 3 (Sync — lean) | Size budgets as **CI warnings**. First reference app (todo). |
+| Phase 3b (Real-Time & Lease) | Size budgets as **CI warnings**. Budgets may be revised based on Phase 3 measurements. |
 | Phase 4 (Primitives) | Size budgets as **CI failures**. CRUD dashboard reference app. Lighthouse CI. |
 | Phase 5 (Battle Testing) | Full comparative benchmarks. All reference apps. Comparison dashboard in repo. |
 
@@ -942,6 +954,10 @@ See the OrgShoots worked example and stress tests in Sections 4.10 and 11.
 **Known footgun -- the ETL pull-down problem:** If a cron generates a large amount of data server-side (thousands of events, megabytes of state), the next client login must pull all of it down before the client has a usable local DB. This is a "know your framework" concern -- developers running heavy ETL via crons should be aware that the client's first sync after an ETL run will be proportional to the data generated. The framework should be smart about this: if the client connects and has no local DB (or a stale one), stream the current snapshot rather than replaying the entire event log. The snapshot-based approach (Section 4.7) means the client downloads the latest snapshot + events since, not the full history.
 
 ### 9.6 -- Offline Detection *(was Section 4.6)*
+
+**Phased implementation:** Phase 3 (lean) uses simple network error detection — if proxyFetch fails, the client is offline. Phase 3b implements the full three-layer lease mechanism below.
+
+> **Assumption to validate (Phase 3):** Simple network error detection ("proxyFetch failed = offline") is sufficient for the lean sync protocol. The three-layer lease mechanism is needed for server takeover (processing webhooks/crons while offline), which Phase 3 defers. If Phase 3 testing shows that the simple approach produces false positives (e.g., transient network errors treated as offline) or misses genuine offline states, the lease mechanism may need to be partially pulled into Phase 3.
 
 **Resolution:** Three-layer lease mechanism using Cloudflare DO's built-in infrastructure. No custom heartbeat protocol.
 
@@ -1097,22 +1113,39 @@ And also: **real-world plausibility checks.** Deploy a tiny test app to Cloudfla
 ### Build order (suggested, not rigid)
 
 ```
-Phase 1: Foundation
+Phase 1: Foundation  [COMPLETE]
   - Nim macro that detects proxyFetch + secret() and generates a Cloudflare Worker
   - Deploy to real Cloudflare, verify credential injection works
   - Client JS that calls proxyFetch, verify round-trip
 
-Phase 2: State
+Phase 2: State  [COMPLETE]
   - Event log: append events, sequence-based continuity, verify at proxyFetch boundary
   - IndexedDB storage on client, SQLite storage in DO
   - Validate: events survive browser refresh, DO restart
 
-Phase 3: Sync
-  - Event log piggybacked on proxyFetch (bidirectional)
-  - Lease mechanism (three-layer)
-  - Offline → reconnect → merge
-  - Validate: airplane mode test, lease timeout test
+Phase 3: Sync (lean)
+  - Client sync layer: proxyFetch automatically carries event delta
+  - DO returns missed server_events bidirectionally
+  - New /do/sync endpoint for event-only exchange (no API forwarding)
+  - 409 reconciliation: server wins, client discards conflicting events, retries
+  - Offline queue: events buffered in IndexedDB, API calls NOT queued
+  - Validate: airplane mode test, two-tab 409 test
   - Performance: size budgets as CI warnings, first reference app (todo)
+  - Assumption validation: proxyFetch overhead, 409 UX, IndexedDB latency,
+    sync glue size, proxyFetch-only sufficiency
+
+Phase 3b: Real-Time & Lease
+  - WebSocket channel to DO (hibernated, server→client push)
+  - proxyFetch-over-WebSocket with HTTP fallback
+  - Three-layer lease mechanism (proxyFetch renewal, WS auto-response, DO Alarm)
+  - Fencing tokens for stale-writer prevention
+  - Server takeover: process webhooks/crons while client offline
+  - Secondary sync: sendBeacon, Background Sync API, navigator.storage.persist()
+  - Validate: lease timeout test, server takeover test, tab close durability
+  - Note: Phase 3b scope may change based on Phase 3 assumption validation.
+    If Phase 3 reveals that proxyFetch-only sync loses data on tab close,
+    heartbeat/sendBeacon moves into Phase 3. If HTTP latency is unacceptable,
+    WebSocket moves earlier.
 
 Phase 4: Primitives
   - guard() + proxy-minted events

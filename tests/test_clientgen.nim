@@ -303,3 +303,144 @@ block testHtmlShellWithoutIndexedDB:
     "HTML shell should NOT include IndexedDB wrapper by default"
 
 echo "test_clientgen: Task 10b passed."
+
+# --- Task 11: generateSyncJs basic structure ---
+block testGenerateSyncJsBasic:
+  let js = generateSyncJs()
+  doAssert "unanimSync" in js,
+    "Sync JS should define unanimSync global"
+  doAssert "proxyFetch" in js,
+    "Sync JS should have proxyFetch function"
+  doAssert "sync" in js,
+    "Sync JS should have sync function"
+
+echo "test_clientgen: Task 11 passed."
+
+# --- Task 12: Sync JS content details ---
+block testSyncJsDependsOnUnanimDB:
+  let js = generateSyncJs()
+  doAssert "unanimDB" in js,
+    "Sync JS should reference unanimDB (dependency)"
+  doAssert "unanimDB.getEventsSince" in js,
+    "Sync JS should call unanimDB.getEventsSince"
+  doAssert "unanimDB.appendEvents" in js,
+    "Sync JS should call unanimDB.appendEvents for server_events"
+  doAssert "unanimDB.getLatestEvent" in js,
+    "Sync JS should call unanimDB.getLatestEvent"
+
+echo "test_clientgen: Task 12a passed."
+
+block testSyncJsEndpoints:
+  let js = generateSyncJs()
+  doAssert "/do/proxy" in js,
+    "Sync JS should target /do/proxy endpoint"
+  doAssert "/do/sync" in js,
+    "Sync JS should target /do/sync endpoint"
+
+echo "test_clientgen: Task 12b passed."
+
+block testSyncJsHandles409:
+  let js = generateSyncJs()
+  doAssert "409" in js,
+    "Sync JS should handle 409 status"
+  doAssert "events_accepted" in js,
+    "Sync JS should check events_accepted field"
+  doAssert "server_events" in js,
+    "Sync JS should handle server_events in response"
+  doAssert "reconcile409" in js,
+    "Sync JS should have reconcile409 function"
+
+echo "test_clientgen: Task 12c passed."
+
+block testSyncJsRetryOn409:
+  let js = generateSyncJs()
+  doAssert "_retry" in js,
+    "Sync JS should use _retry flag for 409 retry logic"
+  doAssert "maxRetries" in js,
+    "Sync JS should have retry limit for 409 reconciliation"
+  doAssert "attempt" in js,
+    "Sync JS should track retry attempts"
+
+echo "test_clientgen: Task 12c2 passed."
+
+block testSyncJsOfflineHandling:
+  let js = generateSyncJs()
+  doAssert "offline" in js,
+    "Sync JS should handle offline state"
+  doAssert "queued" in js,
+    "Sync JS should indicate queued state on network error"
+
+echo "test_clientgen: Task 12d passed."
+
+block testSyncJsSyncMeta:
+  let js = generateSyncJs()
+  doAssert "last_synced_sequence" in js,
+    "Sync JS should track last synced sequence"
+  doAssert "unanim_sync_meta" in js,
+    "Sync JS should use a separate DB for sync metadata"
+
+echo "test_clientgen: Task 12e passed."
+
+block testSyncJsStandalone:
+  let js = generateSyncJs()
+  doAssert "import " notin js,
+    "Sync JS must be standalone — no imports"
+  doAssert "require(" notin js,
+    "Sync JS must be standalone — no requires"
+
+echo "test_clientgen: Task 12f passed."
+
+block testSyncJsUserId:
+  let js = generateSyncJs()
+  doAssert "X-User-Id" in js,
+    "Sync JS should send X-User-Id header for DO routing"
+
+echo "test_clientgen: Task 12g passed."
+
+# --- Task 13: HTML shell includes sync JS ---
+block testHtmlShellIncludesSync:
+  let html = generateHtmlShell("app.js", includeIndexedDB = true, includeSync = true)
+  doAssert "unanimSync" in html,
+    "HTML shell should include sync JS when includeSync=true"
+  doAssert "unanimDB" in html,
+    "HTML shell should include IndexedDB JS when includeIndexedDB=true"
+  # unanimDB must come before unanimSync (dependency order)
+  let dbPos = html.find("unanimDB")
+  let syncPos = html.find("unanimSync")
+  doAssert dbPos < syncPos,
+    "unanimDB must be loaded before unanimSync"
+
+echo "test_clientgen: Task 13a passed."
+
+block testHtmlShellWithoutSync:
+  let html = generateHtmlShell("app.js", includeIndexedDB = true)
+  doAssert "unanimSync" notin html,
+    "HTML shell should NOT include sync JS by default"
+
+echo "test_clientgen: Task 13b passed."
+
+block testHtmlShellSyncRequiresIndexedDB:
+  # If includeSync=true but includeIndexedDB=false, sync JS should
+  # still be included (but unanimDB won't be — it's the caller's
+  # responsibility to ensure unanimDB is available)
+  let html = generateHtmlShell("app.js", includeSync = true)
+  doAssert "unanimSync" in html,
+    "HTML shell should include sync JS when requested"
+
+echo "test_clientgen: Task 13c passed."
+
+# --- Task 14: Node syntax check ---
+import std/os
+import std/osproc
+
+block testSyncJsNodeCheck:
+  let js = generateSyncJs()
+  let tmpDir = "/tmp/unanim_sync_test"
+  createDir(tmpDir)
+  let jsFile = tmpDir & "/sync_test.js"
+  writeFile(jsFile, js)
+  let (output, exitCode) = execCmdEx("node --check " & jsFile)
+  doAssert exitCode == 0,
+    "generateSyncJs output must pass node --check. Errors: " & output
+
+echo "test_clientgen: Task 14 passed (node --check verified)."
