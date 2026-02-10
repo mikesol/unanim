@@ -232,3 +232,74 @@ block testCompileClientJsBasic:
     "Compiled JS should contain JS constructs, got: " & js[0..min(200, js.len-1)]
 
 echo "test_clientgen: Task 7 passed."
+
+# --- Task 8: generateIndexedDBJs basic structure ---
+block testGenerateIndexedDBJsBasic:
+  let js = generateIndexedDBJs()
+  doAssert "indexedDB" in js,
+    "IndexedDB JS should reference indexedDB API"
+  doAssert "openDatabase" in js,
+    "IndexedDB JS should have openDatabase function"
+  doAssert "appendEvents" in js,
+    "IndexedDB JS should have appendEvents function"
+  doAssert "getEventsSince" in js,
+    "IndexedDB JS should have getEventsSince function"
+  doAssert "getLatestEvent" in js,
+    "IndexedDB JS should have getLatestEvent function"
+  doAssert "getAllEvents" in js,
+    "IndexedDB JS should have getAllEvents function"
+
+echo "test_clientgen: Task 8 passed."
+
+# --- Task 9: IndexedDB schema details ---
+block testIndexedDBSchema:
+  let js = generateIndexedDBJs()
+  doAssert "unanim_events" in js,
+    "Database name should be unanim_events"
+  doAssert "keyPath" in js,
+    "Object store should have a keyPath"
+  doAssert "\"sequence\"" in js,
+    "Key path should be 'sequence'"
+
+echo "test_clientgen: Task 9a passed."
+
+block testIndexedDBIndexes:
+  let js = generateIndexedDBJs()
+  doAssert "createIndex" in js,
+    "Should create indexes"
+  doAssert "event_type" in js,
+    "Should index on event_type"
+  doAssert "timestamp" in js,
+    "Should index on timestamp"
+
+echo "test_clientgen: Task 9b passed."
+
+block testIndexedDBStandalone:
+  let js = generateIndexedDBJs()
+  doAssert "import " notin js,
+    "IndexedDB JS must be standalone — no imports"
+  doAssert "require(" notin js,
+    "IndexedDB JS must be standalone — no requires"
+  doAssert "unanimDB" in js,
+    "Should expose unanimDB global object"
+
+echo "test_clientgen: Task 9c passed."
+
+# --- Task 10: HTML shell includes IndexedDB ---
+block testHtmlShellIncludesIndexedDB:
+  let html = generateHtmlShell("app.js", includeIndexedDB = true)
+  doAssert "unanimDB" in html,
+    "HTML shell should include IndexedDB wrapper when enabled"
+  doAssert "openDatabase" in html,
+    "HTML shell should include IndexedDB functions"
+  doAssert "<script src=\"app.js\"></script>" in html,
+    "HTML shell should still include app script"
+
+echo "test_clientgen: Task 10a passed."
+
+block testHtmlShellWithoutIndexedDB:
+  let html = generateHtmlShell("app.js")
+  doAssert "unanimDB" notin html,
+    "HTML shell should NOT include IndexedDB wrapper by default"
+
+echo "test_clientgen: Task 10b passed."
