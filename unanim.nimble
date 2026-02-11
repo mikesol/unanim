@@ -21,3 +21,4 @@ task test, "Run tests":
   exec "nim c -r tests/test_guard.nim"
   exec "nim c -r tests/test_budget.nim"
   exec "nim c -r tests/test_webhook.nim"
+  exec "nim c -r tests/test_cron_after.nim"
